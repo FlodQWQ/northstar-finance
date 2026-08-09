@@ -38,6 +38,13 @@ export interface AIWorkerOptions {
   maxConcurrency?: number;
 }
 
+export function consumeAIWorkerToken(env: NodeJS.ProcessEnv = process.env): string {
+  const token = env.AI_WORKER_TOKEN?.trim() ?? "";
+  if (!token) throw new Error("AI_WORKER_TOKEN is required");
+  delete env.AI_WORKER_TOKEN;
+  return token;
+}
+
 function boundedInteger(
   value: number | undefined,
   fallback: number,

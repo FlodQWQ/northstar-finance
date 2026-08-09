@@ -1,7 +1,7 @@
 import request from "supertest";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { describe, expect, it, vi } from "vitest";
-import { createAIWorkerApp } from "../server/aiWorkerApp";
+import { consumeAIWorkerToken, createAIWorkerApp } from "../server/aiWorkerApp";
 import {
   DisabledAIProvider,
   FallbackAIProvider,
@@ -200,6 +200,12 @@ describe("OpenCode + Agent-Reach provider", () => {
 });
 
 describe("AI worker boundary", () => {
+  it("consumes its bearer token before starting model subprocesses", () => {
+    const environment = { AI_WORKER_TOKEN: "worker-secret" } as NodeJS.ProcessEnv;
+    expect(consumeAIWorkerToken(environment)).toBe("worker-secret");
+    expect(environment).not.toHaveProperty("AI_WORKER_TOKEN");
+  });
+
   it("requires its bearer token and returns only validated research results", async () => {
     const worker = createAIWorkerApp(
       provider("codex-sdk", async () => verifiedResult),

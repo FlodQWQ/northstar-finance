@@ -2,13 +2,10 @@ name: northstar-finance
 
 services:
   finance-dashboard:
-    image: "${DOCKER_IMAGE:?Set DOCKER_IMAGE in the env file}:${IMAGE_TAG:-latest}"
+    image: "${DOCKER_IMAGE:?Set DOCKER_IMAGE in the env file}:${IMAGE_TAG:?Set an immutable IMAGE_TAG in the env file}"
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 20s
-    depends_on:
-      ai-worker:
-        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: "5888"
@@ -65,7 +62,7 @@ services:
         max-file: "5"
 
   ai-worker:
-    image: "${DOCKER_IMAGE:?Set DOCKER_IMAGE in the env file}:${IMAGE_TAG:-latest}"
+    image: "${DOCKER_IMAGE:?Set DOCKER_IMAGE in the env file}:${IMAGE_TAG:?Set an immutable IMAGE_TAG in the env file}"
     pull_policy: always
     command: ["node", "--import", "tsx", "server/ai-worker.ts"]
     restart: unless-stopped
@@ -103,8 +100,6 @@ services:
       - "5890"
     volumes:
       - ai-state:/var/lib/northstar-ai
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777

@@ -35,8 +35,19 @@ jobs:
           fi
 
       - name: Check out repository
-        if: steps.dockerhub.outputs.configured == 'true'
         uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+
+      - name: Verify application
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
 
       - name: Set up QEMU
         if: steps.dockerhub.outputs.configured == 'true'

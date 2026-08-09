@@ -1,11 +1,10 @@
 import "dotenv/config";
 import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { createAIWorkerApp } from "./aiWorkerApp";
+import { consumeAIWorkerToken, createAIWorkerApp } from "./aiWorkerApp";
 import { createLocalAIRuntime } from "./providers/localAI";
 
-const token = process.env.AI_WORKER_TOKEN?.trim() ?? "";
-if (!token) throw new Error("AI_WORKER_TOKEN is required");
+const token = consumeAIWorkerToken();
 
 // Live search is a production invariant, not a user-selectable optimization.
 process.env.OPENCODE_ENABLE_EXA = "1";

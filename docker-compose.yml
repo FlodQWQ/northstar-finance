@@ -11,9 +11,6 @@ services:
     image: northstar-finance:local
     restart: unless-stopped
     stop_grace_period: 20s
-    depends_on:
-      ai-worker:
-        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: "5888"
@@ -44,7 +41,7 @@ services:
       PRICE_COINGECKO_IDS_JSON: "${PRICE_COINGECKO_IDS_JSON:-{}}"
       AI_PROVIDER: "${AI_PROVIDER:-disabled}"
       AI_WORKER_URL: http://ai-worker:5890
-      AI_WORKER_TOKEN: "${AI_WORKER_TOKEN:-local-ai-worker-token-change-me}"
+      AI_WORKER_TOKEN: "${AI_WORKER_TOKEN:?Set AI_WORKER_TOKEN in .env}"
       AI_REQUEST_TIMEOUT_MS: "${AI_REQUEST_TIMEOUT_MS:-200000}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
       CODEX_MODEL: "${CODEX_MODEL:-}"
@@ -84,7 +81,7 @@ services:
       NODE_ENV: production
       AI_WORKER_PORT: "5890"
       AI_WORKER_HOST: 0.0.0.0
-      AI_WORKER_TOKEN: "${AI_WORKER_TOKEN:-local-ai-worker-token-change-me}"
+      AI_WORKER_TOKEN: "${AI_WORKER_TOKEN:?Set AI_WORKER_TOKEN in .env}"
       AI_PROVIDER: "${AI_PROVIDER:-disabled}"
       AI_PROVIDER_TIMEOUT_MS: "${AI_PROVIDER_TIMEOUT_MS:-90000}"
       AI_JOB_TIMEOUT_MS: "${AI_JOB_TIMEOUT_MS:-190000}"

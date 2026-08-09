@@ -162,7 +162,7 @@ OPENCODE_MODEL=opencode/big-pickle
 
 ```powershell
 Copy-Item .env.example .env
-# 修改 .env；至少确认 APP_BASE_URL 和 REGISTRATION_MODE
+# 修改 .env；至少确认 APP_BASE_URL、REGISTRATION_MODE，并为 AI_WORKER_TOKEN 生成随机值
 docker compose up -d --build
 docker compose ps
 docker compose logs -f finance-dashboard
@@ -288,13 +288,9 @@ docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-ba
 
 ### 当前 AI 实现状态
 
-当前版本只实现了禁用 provider 和用于本地演示、测试的离线 mock provider。以下三种方案都只是预留适配边界，尚未接入：
+当前支持 `disabled`、开发专用 `mock`、`codex-sdk`、`opencode-agent-reach` 和 Codex 优先的 `auto`。生产部署默认仍为 `disabled`；启用后，事件“立即运行”和预期资产 AI 检查会执行真实联网搜索，并将实际 provider、来源和搜索证据写入对应账户的运行记录。完整配置和隔离边界见上文“AI 联网研究”。
 
-- **OpenAI API**：环境变量和 `AiProvider` 接口已预留，但尚无 OpenAI HTTP 客户端；填写 `OPENAI_API_KEY` 不会触发真实联网查询。
-- **Codex CLI**：尚无子进程 adapter，不会调用本机 `codex` 命令。未来若采用，可基于官方文档中的 [`codex exec` 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)实现受限 worker。
-- **TradingAgents**：当前不是项目依赖，也没有 Python 服务或桥接层；未来只能通过独立 provider/worker 接入，不能直接读写生产 SQLite。
-
-因此当前事件“立即运行”和预期资产 AI 检查返回的是 mock 研究结果，不是真实新闻、行情或联网分析。`AI_PROVIDER=none` 是默认生产配置；在真实 provider 完成、测试和安全审查前，不应把 `AI_PROVIDER` 改成 `openai`、`codex` 或 `tradingagents`。
+Codex SDK 的 `web_search` 完成项可以证明本次运行执行了实时搜索，但当前 SDK 不返回原始搜索结果 URL，因此 Codex 引用仍属于模型输出，不能当作来源内容的密码学证明。OpenCode 备用路径则会把模型引用限制为 Agent-Reach/Exa 原始结果中实际出现的 URL。两条路径的外部内容仍需按不可信输入处理。
 
 未来扩展遵守以下边界：
 
@@ -303,9 +299,9 @@ docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-ba
 - `AiProvider` 接收最小必要上下文并返回经过 schema 约束的建议；服务端验证后才可落库。
 - `NotificationProvider` 负责投递和返回 provider message id，调度器负责重试与审计。
 
-所有 provider 都应有超时、重试上限、速率限制、代理设置和结构化错误。外部网页与 AI 输出一律按不可信输入处理，禁止 provider 直接访问 SQLite、执行任意 shell 或获得不必要的密钥。未来若接入 Codex CLI，应放在受限工作目录或独立 worker 中，只允许结构化输入输出，不应把生产数据库目录、Docker socket 或完整进程环境暴露给它。
+所有 provider 都有超时、并发上限、代理设置和结构化错误。外部网页与 AI 输出一律按不可信输入处理；provider 运行在独立 worker 中，不挂载生产 SQLite 或 Docker socket，Codex 命令工具关闭，OpenCode 模型工具权限全部拒绝。
 
-`AI_PROVIDER=none` 必须保持为完整可用路径：用户仍可手动维护价格、状态和事件。这样联网 AI 是增强能力，而不是资产数据的单点依赖。
+`AI_PROVIDER=disabled` 保持为完整可用路径：用户仍可手动维护价格、状态和事件。主应用启动也不依赖 AI worker 健康，因此联网 AI 是增强能力，而不是资产数据的单点依赖。
 
 ## 上线检查
 
