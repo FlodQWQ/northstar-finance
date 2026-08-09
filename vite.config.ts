@@ -10,6 +10,21 @@ function normalizeBasePath(value: string | undefined): string {
   return `/${trimmed.replace(/^\/+|\/+$/g, "")}/`;
 }
 
+function splitReactRuntime(id: string): string | undefined {
+  const normalizedId = id.replaceAll("\\", "/");
+  const reactRuntimePackages = [
+    "/node_modules/react/",
+    "/node_modules/react-dom/",
+    "/node_modules/react-router/",
+    "/node_modules/react-router-dom/",
+    "/node_modules/scheduler/",
+  ];
+
+  return reactRuntimePackages.some((packagePath) => normalizedId.includes(packagePath))
+    ? "react-vendor"
+    : undefined;
+}
+
 export default defineConfig(({ mode }) => {
   const fileEnvironment = loadEnv(mode, process.cwd(), "");
   const basePath = normalizeBasePath(
@@ -20,6 +35,13 @@ export default defineConfig(({ mode }) => {
   return {
     base: basePath,
     plugins: [react()],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: splitReactRuntime,
+        },
+      },
+    },
     server: {
       host: "127.0.0.1",
       port: 5888,
