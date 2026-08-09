@@ -205,6 +205,12 @@ const schema = `
     revoked_at TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS auth_login_limits (
+    identifier_hash TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    reset_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS assets (
     id TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL DEFAULT '${DEFAULT_OWNER_ID}' REFERENCES users(id) ON DELETE CASCADE,
@@ -408,6 +414,8 @@ const schema = `
     ON sessions(user_id, revoked_at, idle_expires_at);
   CREATE INDEX IF NOT EXISTS idx_api_tokens_user
     ON api_tokens(user_id, revoked_at, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_auth_login_limits_reset
+    ON auth_login_limits(reset_at);
   CREATE INDEX IF NOT EXISTS idx_assets_owner_name
     ON assets(owner_id, name COLLATE NOCASE);
   CREATE INDEX IF NOT EXISTS idx_asset_operations_asset_time
@@ -614,6 +622,12 @@ function installFreshSchema(db: SqliteDatabase): void {
     db.exec(schema);
     ensureDefaultOwner(db);
     initializeUserSettings(db, DEFAULT_OWNER_ID);
+    const bootstrapUsername = process.env.APP_AUTH_USERNAME?.trim() ?? "";
+    const bootstrapPassword = process.env.APP_AUTH_PASSWORD ?? "";
+    if (!getBootstrapUser(db) && (bootstrapUsername || bootstrapPassword)) {
+      const bootstrap = createBootstrapUser(db);
+      initializeUserSettings(db, bootstrap.id);
+    }
     assertForeignKeys(db);
     db.pragma(`user_version = ${DATABASE_SCHEMA_VERSION}`);
   });

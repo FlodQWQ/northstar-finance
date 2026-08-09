@@ -51,8 +51,8 @@ npm run start
 | `DATABASE_PATH` | `./data/finance.sqlite` | SQLite 文件路径；容器内为 `/app/data/finance.sqlite` |
 | `SEED_DEMO_DATA` | 开发为 `true`，生产为 `false` | 是否在空数据库中写入演示资产与事件 |
 | `APP_BASE_URL` | `http://127.0.0.1:5888` | 会话 Cookie Path、同源校验、AI capabilities 与未来邮件链接使用的公开地址 |
-| `REGISTRATION_MODE` | `open` | `open` 允许页面注册新账户；`closed` 仅允许已有账户登录 |
-| `APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD` | 空 | 仅用于把 v1 单用户数据库迁移到首个 owner；v2 日常运行不读取它们 |
+| `REGISTRATION_MODE` | 开发为 `open`，生产为 `closed` | `open` 允许页面注册新账户；`closed` 仅允许已有账户登录 |
+| `APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD` | 空 | 新生产库的一次性 owner 启动账号；迁移 v1 数据库时也用它接管旧数据 |
 | `SCHEDULER_ENABLED` | `true` | 是否启动持久化事件调度器 |
 | `SCHEDULER_POLL_MS` | `30000` | 扫描到期事件的间隔，单位毫秒 |
 | `SCHEDULER_LEASE_MS` | `600000` | 单次调度任务的数据库租约时长，单位毫秒 |
@@ -81,9 +81,11 @@ npm run start
 
 每个资产、流水、价格、预期资产、事件、运行记录、邮件 outbox、设置和 AI 审计行都绑定不可变的 `owner_id`。仓储查询不会接受客户端提交的 owner，跨账户资源访问统一返回 `404`。调度器、邮件与 AI 命令同样按 owner 执行。
 
-`REGISTRATION_MODE=open` 时登录页可创建账户；完成初始账户创建后，可改为 `closed` 并重启容器。静态登录页面、`/api/health` 和认证接口公开，普通业务 API 必须使用 Session。AI 路由只接受账户级 Bearer token，不接受页面 Session；Bearer token 也不能访问普通业务 API。
+生产环境未配置 `REGISTRATION_MODE` 时默认关闭注册。首次部署应先设置一次性的 `APP_AUTH_USERNAME` 和 `APP_AUTH_PASSWORD` 创建 owner，确认登录后从环境中删除这两个明文值，再按需将 `REGISTRATION_MODE` 改为 `open`。后续页面注册的账户都是普通成员，不会因注册顺序取得全局 owner 权限。静态登录页面、`/api/health` 和认证接口公开，普通业务 API 必须使用 Session。登录按客户端 IP 和规范化账户双重限流，其中账户失败计数保存在 SQLite，不能通过切换 IP 或重启服务绕过。
 
-升级 v1 数据库时，首次启动需暂时保留原 `APP_AUTH_USERNAME`、`APP_AUTH_PASSWORD` 和可选 `AI_API_TOKEN`。迁移会把所有旧数据和旧 AI token 归属该 owner；成功登录并确认数据后即可从环境文件删除这些旧变量。
+AI 路由只接受账户级 Bearer token，不接受页面 Session；Bearer token 也不能访问普通业务 API。
+
+升级 v1 数据库时，首次启动需暂时保留原 `APP_AUTH_USERNAME`、`APP_AUTH_PASSWORD` 和可选 `AI_API_TOKEN`。迁移会把所有旧数据和旧 AI token 归属该 owner；成功登录并确认数据后即可从环境文件删除这些旧变量。新生产库也可用同样两个账号变量创建一次性 owner；两者只在数据库尚无启动 owner 时读取。
 
 ## AI 原子命令 API
 
@@ -203,11 +205,13 @@ location = /northstar {
 location ^~ /northstar/ {
     proxy_pass http://127.0.0.1:5888/;
     proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Prefix /northstar;
 }
 ```
+
+应用只信任紧邻它的一层反向代理，因此 Nginx 必须发送单一、已规范化的客户端地址，不能继续追加外部传入的 `X-Forwarded-For`。使用 Cloudflare 橙云时，应先按 Cloudflare 官方 IP 段配置 `set_real_ip_from`，再设置 `real_ip_header CF-Connecting-IP` 和 `real_ip_recursive on`；此后 `$remote_addr` 才是经过来源校验的真实客户端地址。不要在未限制来源时直接信任客户端提交的 `CF-Connecting-IP`。
 
 VPS 防火墙只需开放 SSH、HTTP 和 HTTPS。若临时需要通过 `http://VPS_IP:5888` 直连，可将 Compose 端口映射改为 `5888:5888` 并限制来源 IP；不建议长期这样部署。
 

@@ -69,6 +69,31 @@ describe("openDatabase", () => {
     expect(db.prepare("SELECT COUNT(*) FROM tracked_events").pluck().get()).toBe(0);
   });
 
+  it("creates a one-time production owner only from explicit bootstrap credentials", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("APP_AUTH_USERNAME", "deployment-owner");
+    vi.stubEnv("APP_AUTH_PASSWORD", "correct horse battery staple");
+
+    const { db } = createFileDatabase(false);
+    const owner = db.prepare(`
+      SELECT username, password_hash, status, role FROM users
+      WHERE username_normalized = 'deployment-owner'
+    `).get() as {
+      username: string;
+      password_hash: string;
+      status: string;
+      role: string;
+    };
+
+    expect(owner).toMatchObject({
+      username: "deployment-owner",
+      status: "active",
+      role: "owner",
+    });
+    expect(owner.password_hash).toMatch(/^\$scrypt\$/);
+    expect(owner.password_hash).not.toContain("correct horse battery staple");
+  });
+
   it("allows demo records to be explicitly enabled in production", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("SEED_DEMO_DATA", "true");

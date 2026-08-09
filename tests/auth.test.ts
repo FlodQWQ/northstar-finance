@@ -1,16 +1,20 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import request from "supertest";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type FinanceApp } from "../server/app";
 import { MockAIProvider } from "../server/providers/ai";
 
 const origin = "http://northstar.test";
 const password = "correct horse battery staple";
 const apps: FinanceApp[] = [];
+const temporaryDirectories: string[] = [];
 
 interface SignedInAccount {
   cookie: string;
   csrfToken: string;
-  user: { id: string; username: string };
+  user: { id: string; username: string; role: "owner" | "user" };
 }
 
 function createProtectedApp(options: Parameters<typeof createApp>[0] = {}): FinanceApp {
@@ -64,6 +68,10 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const app of apps.splice(0)) app.finance.close();
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  vi.unstubAllEnvs();
 });
 
 describe("application authentication", () => {
@@ -113,6 +121,17 @@ describe("application authentication", () => {
       .set("Cookie", account.cookie)
       .expect(200);
     expect(signedOut.body.data.authenticated).toBe(false);
+  });
+
+  it("never promotes a public production registration to deployment owner", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("APP_AUTH_USERNAME", "");
+    vi.stubEnv("APP_AUTH_PASSWORD", "");
+    const app = createProtectedApp({ registrationMode: "open" });
+
+    const account = await register(app, "first-public-user");
+
+    expect(account.user).toMatchObject({ username: "first-public-user", role: "user" });
   });
 
   it("rejects duplicate identities, weak passwords, closed registration, and bad credentials", async () => {
@@ -199,6 +218,42 @@ describe("application authentication", () => {
       .post("/api/auth/login")
       .set("Origin", origin)
       .send({ identifier: "limited-owner", password })
+      .expect(429);
+    expect(limited.body.error.code).toBe("RATE_LIMITED");
+  });
+
+  it("persists account login limits across client IPs and application restarts", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "northstar-auth-limit-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "finance.sqlite");
+    const initial = createProtectedApp({ databasePath });
+    await register(initial, "persistent-limit");
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await request(initial)
+        .post("/api/auth/login")
+        .set("Origin", origin)
+        .set("X-Forwarded-For", `198.51.100.${attempt + 1}`)
+        .send({ identifier: "persistent-limit", password: "incorrect password value" })
+        .expect(401);
+    }
+    initial.finance.close();
+    apps.splice(apps.indexOf(initial), 1);
+
+    const restarted = createProtectedApp({ databasePath });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await request(restarted)
+        .post("/api/auth/login")
+        .set("Origin", origin)
+        .set("X-Forwarded-For", `203.0.113.${attempt + 1}`)
+        .send({ identifier: "PERSISTENT-LIMIT", password: "incorrect password value" })
+        .expect(401);
+    }
+    const limited = await request(restarted)
+      .post("/api/auth/login")
+      .set("Origin", origin)
+      .set("X-Forwarded-For", "192.0.2.25")
+      .send({ identifier: "persistent-limit", password })
       .expect(429);
     expect(limited.body.error.code).toBe("RATE_LIMITED");
   });

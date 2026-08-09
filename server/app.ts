@@ -6,6 +6,7 @@ import express, {
   type Response,
 } from "express";
 import helmet from "helmet";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ZodError, type ZodType } from "zod";
@@ -162,6 +163,53 @@ class FixedWindowRateLimiter {
   }
 }
 
+class PersistentLoginRateLimiter {
+  public constructor(
+    private readonly db: SqliteDatabase,
+    private readonly limit: number,
+    private readonly windowMs: number,
+  ) {}
+
+  private identifierHash(identifier: string): string {
+    return createHash("sha256").update(identifier).digest("hex");
+  }
+
+  public consume(identifier: string): void {
+    const now = Date.now();
+    const identifierHash = this.identifierHash(identifier);
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM auth_login_limits WHERE reset_at <= ?").run(now);
+      const existing = this.db.prepare(`
+        SELECT attempts, reset_at FROM auth_login_limits WHERE identifier_hash = ?
+      `).get(identifierHash) as { attempts: number; reset_at: number } | undefined;
+      if (existing && existing.attempts >= this.limit) {
+        throw new AuthError("Too many authentication attempts; try again later", 429, "RATE_LIMITED");
+      }
+      if (existing) {
+        this.db.prepare(`
+          UPDATE auth_login_limits SET attempts = attempts + 1 WHERE identifier_hash = ?
+        `).run(identifierHash);
+        return;
+      }
+      this.db.prepare(`
+        INSERT INTO auth_login_limits (identifier_hash, attempts, reset_at)
+        VALUES (?, 1, ?)
+      `).run(identifierHash, now + this.windowMs);
+    })();
+  }
+
+  public reset(identifier: string): void {
+    this.db.prepare("DELETE FROM auth_login_limits WHERE identifier_hash = ?")
+      .run(this.identifierHash(identifier));
+  }
+}
+
+function normalizeLoginIdentifier(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim().normalize("NFKC").toLowerCase().slice(0, 254)
+    : "invalid";
+}
+
 function chooseAIProvider(providerId?: string): AIProvider {
   const configured = providerId?.toLowerCase();
   if (configured === undefined || configured === "mock") return new MockAIProvider();
@@ -186,7 +234,9 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   const appBaseUrl = options.appBaseUrl ?? process.env.APP_BASE_URL?.trim() ?? "";
   const configuredOrigin = appBaseUrl ? new URL(appBaseUrl).origin : "";
   const publicAICommandEndpoint = resolvePublicAICommandEndpoint(appBaseUrl);
-  const registrationMode = options.registrationMode ?? process.env.REGISTRATION_MODE?.trim() ?? "open";
+  const registrationMode = options.registrationMode
+    ?? process.env.REGISTRATION_MODE?.trim()
+    ?? (production ? "closed" : "open");
   if (registrationMode !== "open" && registrationMode !== "closed") {
     throw new Error("REGISTRATION_MODE must be open or closed");
   }
@@ -197,11 +247,15 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   const ownsDatabase = options.db === undefined;
   const registrationLimiter = new FixedWindowRateLimiter(5, 60 * 60 * 1_000);
   const loginIpLimiter = new FixedWindowRateLimiter(20, 15 * 60 * 1_000);
-  const loginAccountLimiter = new FixedWindowRateLimiter(5, 15 * 60 * 1_000);
   const db = options.db ?? openDatabase({ path: options.databasePath, seed: options.seed });
+  const loginAccountLimiter = new PersistentLoginRateLimiter(db, 5, 15 * 60 * 1_000);
   const defaultOwnerId = getBootstrapUserId(db) ?? DEFAULT_OWNER_ID;
   const repository = new FinanceRepository(db, defaultOwnerId);
-  const authService = options.authService ?? new AuthService(db, { appBaseUrl, production });
+  const authService = options.authService ?? new AuthService(db, {
+    appBaseUrl,
+    production,
+    firstUserIsOwner: !production,
+  });
   const aiProviderFor = (ownerRepository: FinanceRepository) =>
     options.aiProvider ?? chooseAIProvider(ownerRepository.getSettings().aiProvider);
   const aiProvider = aiProviderFor(repository);
@@ -333,15 +387,14 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   app.post("/api/auth/login", asyncRoute(async (request, response) => {
     assertSameOrigin(request, configuredOrigin);
     const clientIp = request.ip || "unknown";
-    const identifier = typeof request.body?.identifier === "string"
-      ? request.body.identifier.trim().toLowerCase().slice(0, 254)
-      : "invalid";
+    const identifier = normalizeLoginIdentifier(request.body?.identifier);
     loginIpLimiter.consume(clientIp);
-    loginAccountLimiter.consume(`${clientIp}:${identifier}`);
+    loginAccountLimiter.consume(identifier);
     const created = await authService.login({
       identifier: request.body?.identifier,
       password: request.body?.password,
     }, sessionMetadata(request));
+    loginAccountLimiter.reset(identifier);
     setSessionCookie(response, created);
     response.json(data(sessionPayload(created), "Signed in"));
   }));
