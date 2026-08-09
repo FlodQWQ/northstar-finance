@@ -258,8 +258,8 @@ export class AICommandService {
   private replayExisting(input: AICommandBatchInput): AICommandBatchResult | undefined {
     const existing = this.db.prepare(`
       SELECT status, request_json, result_json
-      FROM ai_command_batches WHERE idempotency_key = ?
-    `).get(input.idempotencyKey) as {
+      FROM ai_command_batches WHERE owner_id = ? AND idempotency_key = ?
+    `).get(this.repository.ownerId, input.idempotencyKey) as {
       status: "running" | "success" | "failed";
       request_json: string;
       result_json: string;
@@ -310,10 +310,18 @@ export class AICommandService {
     const executeBatch = this.db.transaction(() => {
       this.db.prepare(`
         INSERT INTO ai_command_batches (
-          id, idempotency_key, actor, dry_run, status, request_json,
+          id, owner_id, idempotency_key, actor, dry_run, status, request_json,
           result_json, created_at, finished_at
-        ) VALUES (?, ?, ?, ?, 'running', ?, '{}', ?, NULL)
-      `).run(batchId, input.idempotencyKey, input.actor, input.dryRun ? 1 : 0, JSON.stringify(input), now);
+        ) VALUES (?, ?, ?, ?, ?, 'running', ?, '{}', ?, NULL)
+      `).run(
+        batchId,
+        this.repository.ownerId,
+        input.idempotencyKey,
+        input.actor,
+        input.dryRun ? 1 : 0,
+        JSON.stringify(input),
+        now,
+      );
 
       const runCommands = () => input.commands.forEach((command, index) => {
         const commandId = command.commandId ?? `${batchId}:${index}`;
@@ -439,11 +447,12 @@ export class AICommandService {
       results.forEach((commandResult, index) => {
         this.db.prepare(`
           INSERT INTO ai_command_audit (
-            id, batch_id, command_index, command_type, target_id, status,
+            id, owner_id, batch_id, command_index, command_type, target_id, status,
             input_json, result_json, error, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?)
         `).run(
           randomUUID(),
+          this.repository.ownerId,
           batchId,
           index,
           commandResult.type,
@@ -466,15 +475,21 @@ export class AICommandService {
       };
       this.db.prepare(`
         UPDATE ai_command_batches
-        SET status = 'success', result_json = ?, finished_at = ? WHERE id = ?
-      `).run(JSON.stringify(response), new Date().toISOString(), batchId);
+        SET status = 'success', result_json = ?, finished_at = ?
+        WHERE owner_id = ? AND id = ?
+      `).run(
+        JSON.stringify(response),
+        new Date().toISOString(),
+        this.repository.ownerId,
+        batchId,
+      );
       return response;
     });
 
     try {
       return executeBatch();
     } catch (error) {
-      if (/UNIQUE constraint failed: ai_command_batches\.idempotency_key/i.test(
+      if (/UNIQUE constraint failed: ai_command_batches\.(?:owner_id, ai_command_batches\.)?idempotency_key/i.test(
         error instanceof Error ? error.message : "",
       )) {
         const concurrentReplay = this.replayExisting(input);
@@ -513,11 +528,12 @@ export class AICommandService {
       const persistFailure = this.db.transaction(() => {
         this.db.prepare(`
           INSERT OR IGNORE INTO ai_command_batches (
-            id, idempotency_key, actor, dry_run, status, request_json,
+            id, owner_id, idempotency_key, actor, dry_run, status, request_json,
             result_json, created_at, finished_at
-          ) VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, 'failed', ?, ?, ?, ?)
         `).run(
           batchId,
+          this.repository.ownerId,
           input.idempotencyKey,
           input.actor,
           input.dryRun ? 1 : 0,
@@ -528,13 +544,14 @@ export class AICommandService {
         );
         const insertAudit = this.db.prepare(`
           INSERT OR IGNORE INTO ai_command_audit (
-            id, batch_id, command_index, command_type, target_id, status,
+            id, owner_id, batch_id, command_index, command_type, target_id, status,
             input_json, result_json, error, created_at
-          ) VALUES (?, ?, ?, ?, ?, 'failed', ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?, ?)
         `);
         failedResults.forEach((result, index) => {
           insertAudit.run(
             randomUUID(),
+            this.repository.ownerId,
             batchId,
             index,
             result.type,

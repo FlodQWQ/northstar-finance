@@ -3,11 +3,15 @@ import {
   CalendarClock,
   Compass,
   LayoutDashboard,
+  LoaderCircle,
+  LogOut,
   Settings,
   Sparkles,
+  UserRound,
   WalletCards,
 } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import type { AuthUser } from "../api";
 
 const navItems = [
   { to: "/", label: "总览", icon: LayoutDashboard, end: true },
@@ -25,7 +29,15 @@ const pageNames: Record<string, string> = {
   "/settings": "系统设置",
 };
 
-export default function Shell() {
+export default function Shell({
+  user,
+  loggingOut,
+  onLogout,
+}: {
+  user: AuthUser;
+  loggingOut: boolean;
+  onLogout: () => void;
+}) {
   const location = useLocation();
   const pageName = pageNames[location.pathname] || "Northstar";
 
@@ -53,13 +65,32 @@ export default function Shell() {
 
       <div className="workspace">
         <header className="topbar">
-          <div>
+          <div className="topbar-title">
             <span className="mobile-brand"><Compass size={18} /></span>
             <strong>{pageName}</strong>
           </div>
-          <button className="icon-button" type="button" aria-label="通知">
-            <Bell size={19} />
-          </button>
+          <div className="topbar-actions">
+            <button className="icon-button notification-button" type="button" aria-label="通知" title="通知">
+              <Bell size={19} />
+            </button>
+            <div className="account-control" role="group" aria-label={`当前账户：${user.username}`}>
+              <span className="account-avatar"><UserRound size={17} /></span>
+              <span className="account-copy">
+                <strong title={user.username}>{user.username}</strong>
+                <small>{user.role === "owner" ? "所有者" : "成员"}</small>
+              </span>
+              <button
+                className="icon-button account-logout"
+                type="button"
+                aria-label={`退出 ${user.username}`}
+                title="退出登录"
+                onClick={onLogout}
+                disabled={loggingOut}
+              >
+                {loggingOut ? <LoaderCircle className="spin" size={18} /> : <LogOut size={18} />}
+              </button>
+            </div>
+          </div>
         </header>
         <main id="main-content" className="main-content" tabIndex={-1}>
           <Outlet />

@@ -6,11 +6,15 @@ import express, {
   type Response,
 } from "express";
 import helmet from "helmet";
-import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ZodError, type ZodType } from "zod";
-import { openDatabase, type SqliteDatabase } from "./db/database";
+import {
+  DEFAULT_OWNER_ID,
+  getBootstrapUserId,
+  openDatabase,
+  type SqliteDatabase,
+} from "./db/database";
 import {
   DisabledAIProvider,
   MockAIProvider,
@@ -21,6 +25,12 @@ import {
   type PriceProvider,
 } from "./providers/price";
 import { AICommandService, getAICommandCapabilities } from "./services/aiCommands";
+import {
+  AuthError,
+  AuthService,
+  type AuthenticatedSession,
+  type ApiTokenPrincipal,
+} from "./services/auth";
 import { SmtpEmailOutbox, type EmailOutbox } from "./services/email";
 import { MonitorService } from "./services/monitor";
 import { DomainError, FinanceRepository } from "./services/repository";
@@ -51,13 +61,14 @@ export interface CreateAppOptions {
   staticPath?: string;
   schedulerPollMs?: number;
   appBaseUrl?: string | null;
-  aiApiToken?: string | null;
-  appAuthUsername?: string | null;
-  appAuthPassword?: string | null;
+  registrationMode?: "open" | "closed";
+  authService?: AuthService;
+  disableAuthenticationForTests?: boolean;
 }
 
 export interface FinanceRuntime {
   db: SqliteDatabase;
+  authService: AuthService;
   repository: FinanceRepository;
   aiProvider: AIProvider;
   priceProvider: PriceProvider;
@@ -86,20 +97,64 @@ function asyncRoute(
   };
 }
 
-const loopbackAddresses = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
-
-function timingSafeStringEqual(expected: string, supplied: string): boolean {
-  const expectedBytes = Buffer.from(expected);
-  const suppliedBytes = Buffer.from(supplied);
-  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+interface RequestServices {
+  session?: AuthenticatedSession;
+  apiPrincipal?: ApiTokenPrincipal;
+  repository: FinanceRepository;
+  emailOutbox: EmailOutbox;
+  monitorService: MonitorService;
+  commandService: AICommandService;
 }
 
-function isLoopbackRequest(request: Request): boolean {
-  return loopbackAddresses.has(request.ip ?? "");
+function services(response: Response): RequestServices {
+  const value = response.locals.finance as RequestServices | undefined;
+  if (!value) throw new Error("Authenticated request services are unavailable");
+  return value;
 }
 
-function isAIPath(request: Request): boolean {
-  return request.path === "/api/ai" || request.path.startsWith("/api/ai/");
+function bearerToken(request: Request): string {
+  const authorization = request.header("authorization") ?? "";
+  const match = /^Bearer\s+(.+)$/i.exec(authorization);
+  return match?.[1]?.trim() ?? "";
+}
+
+function requestOrigin(request: Request): string {
+  return `${request.protocol}://${request.get("host") ?? ""}`;
+}
+
+function assertSameOrigin(request: Request, configuredOrigin: string): void {
+  const suppliedOrigin = request.header("origin") ?? "";
+  const expectedOrigin = configuredOrigin || requestOrigin(request);
+  if (!suppliedOrigin || suppliedOrigin !== expectedOrigin) {
+    throw new AuthError("Request origin is invalid", 403, "INVALID_ORIGIN");
+  }
+}
+
+class FixedWindowRateLimiter {
+  private readonly entries = new Map<string, { count: number; resetAt: number }>();
+
+  public constructor(
+    private readonly limit: number,
+    private readonly windowMs: number,
+  ) {}
+
+  public consume(key: string): void {
+    const now = Date.now();
+    const existing = this.entries.get(key);
+    if (!existing || existing.resetAt <= now) {
+      this.entries.set(key, { count: 1, resetAt: now + this.windowMs });
+    } else if (existing.count >= this.limit) {
+      throw new AuthError("Too many authentication attempts; try again later", 429, "RATE_LIMITED");
+    } else {
+      existing.count += 1;
+    }
+
+    if (this.entries.size > 10_000) {
+      for (const [entryKey, entry] of this.entries) {
+        if (entry.resetAt <= now) this.entries.delete(entryKey);
+      }
+    }
+  }
 }
 
 function chooseAIProvider(providerId?: string): AIProvider {
@@ -124,28 +179,71 @@ function resolvePublicAICommandEndpoint(appBaseUrl: string): string {
 export function createApp(options: CreateAppOptions = {}): FinanceApp {
   const production = process.env.NODE_ENV === "production";
   const appBaseUrl = options.appBaseUrl ?? process.env.APP_BASE_URL?.trim() ?? "";
+  const configuredOrigin = appBaseUrl ? new URL(appBaseUrl).origin : "";
   const publicAICommandEndpoint = resolvePublicAICommandEndpoint(appBaseUrl);
+  const registrationMode = options.registrationMode ?? process.env.REGISTRATION_MODE?.trim() ?? "open";
+  if (registrationMode !== "open" && registrationMode !== "closed") {
+    throw new Error("REGISTRATION_MODE must be open or closed");
+  }
+  const authenticationDisabled = options.disableAuthenticationForTests === true;
+  if (authenticationDisabled && process.env.NODE_ENV !== "test") {
+    throw new Error("disableAuthenticationForTests is only available while NODE_ENV=test");
+  }
   const ownsDatabase = options.db === undefined;
+  const registrationLimiter = new FixedWindowRateLimiter(5, 60 * 60 * 1_000);
+  const loginIpLimiter = new FixedWindowRateLimiter(20, 15 * 60 * 1_000);
+  const loginAccountLimiter = new FixedWindowRateLimiter(5, 15 * 60 * 1_000);
   const db = options.db ?? openDatabase({ path: options.databasePath, seed: options.seed });
-  const repository = new FinanceRepository(db);
-  const aiProvider = options.aiProvider ?? chooseAIProvider(repository.getSettings().aiProvider);
+  const defaultOwnerId = getBootstrapUserId(db) ?? DEFAULT_OWNER_ID;
+  const repository = new FinanceRepository(db, defaultOwnerId);
+  const authService = options.authService ?? new AuthService(db, { appBaseUrl, production });
+  const aiProviderFor = (ownerRepository: FinanceRepository) =>
+    options.aiProvider ?? chooseAIProvider(ownerRepository.getSettings().aiProvider);
+  const aiProvider = aiProviderFor(repository);
   const priceProvider = options.priceProvider ?? new ManualPriceProvider();
-  const emailOutbox = options.emailOutbox ?? new SmtpEmailOutbox(db, repository);
-  const monitorService = new MonitorService(db, repository, aiProvider, emailOutbox);
+  const emailOutboxFor = (ownerRepository: FinanceRepository) =>
+    options.emailOutbox ?? new SmtpEmailOutbox(db, ownerRepository);
+  const emailOutbox = emailOutboxFor(repository);
+  const monitorServiceFor = (ownerRepository: FinanceRepository) =>
+    new MonitorService(
+      db,
+      ownerRepository,
+      aiProviderFor(ownerRepository),
+      emailOutboxFor(ownerRepository),
+    );
+  const monitorService = monitorServiceFor(repository);
   const commandService = new AICommandService(db, repository);
-  const aiApiToken = options.aiApiToken ?? process.env.AI_API_TOKEN?.trim() ?? "";
-  const appAuthUsername = options.appAuthUsername ?? process.env.APP_AUTH_USERNAME ?? "";
-  const appAuthPassword = options.appAuthPassword ?? process.env.APP_AUTH_PASSWORD ?? "";
   const scheduler = new PersistentScheduler(
     db,
-    monitorService,
-    emailOutbox,
+    (ownerId) => monitorServiceFor(new FinanceRepository(db, ownerId)),
+    (ownerId) => emailOutboxFor(new FinanceRepository(db, ownerId)),
     options.schedulerPollMs,
   );
+
+  const createRequestServices = (
+    ownerId: string,
+    identity: Pick<RequestServices, "session" | "apiPrincipal"> = {},
+  ): RequestServices => {
+    const ownerRepository = new FinanceRepository(db, ownerId);
+    const ownerEmailOutbox = emailOutboxFor(ownerRepository);
+    return {
+      ...identity,
+      repository: ownerRepository,
+      emailOutbox: ownerEmailOutbox,
+      monitorService: new MonitorService(
+        db,
+        ownerRepository,
+        aiProviderFor(ownerRepository),
+        ownerEmailOutbox,
+      ),
+      commandService: new AICommandService(db, ownerRepository),
+    };
+  };
 
   const app = express() as FinanceApp;
   app.finance = {
     db,
+    authService,
     repository,
     aiProvider,
     priceProvider,
@@ -160,64 +258,11 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   };
 
   app.disable("x-powered-by");
+  // The production container only listens behind the host's loopback reverse proxy.
+  app.set("trust proxy", 1);
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use((request, response, next) => {
     if (request.path.startsWith("/api/")) response.setHeader("Cache-Control", "no-store");
-    next();
-  });
-  app.use((request, response, next) => {
-    if (
-      request.path === "/api/health" ||
-      isAIPath(request) ||
-      (!production && isLoopbackRequest(request))
-    ) {
-      next();
-      return;
-    }
-
-    if (!appAuthUsername || !appAuthPassword) {
-      response.status(503).json({
-        error: {
-          code: "APP_AUTH_DISABLED",
-          message: "APP_AUTH_USERNAME and APP_AUTH_PASSWORD are required outside local development",
-        },
-      });
-      return;
-    }
-
-    const authorization = request.header("authorization") ?? "";
-    const match = /^Basic\s+(.+)$/i.exec(authorization);
-    const expected = Buffer.from(`${appAuthUsername}:${appAuthPassword}`, "utf8").toString("base64");
-    const supplied = match?.[1] ?? "";
-    if (!timingSafeStringEqual(expected, supplied)) {
-      response.setHeader("WWW-Authenticate", 'Basic realm="Northstar Finance", charset="UTF-8"');
-      response.status(401).json({
-        error: { code: "UNAUTHORIZED", message: "Valid application credentials are required" },
-      });
-      return;
-    }
-    next();
-  });
-  app.use("/api/ai", (request, response, next) => {
-    if (!aiApiToken) {
-      if (production || !isLoopbackRequest(request)) {
-        response.status(503).json({
-          error: { code: "AI_API_DISABLED", message: "AI_API_TOKEN is required outside local development" },
-        });
-        return;
-      }
-      next();
-      return;
-    }
-
-    const authorization = request.header("authorization") ?? "";
-    const supplied = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
-    if (!timingSafeStringEqual(aiApiToken, supplied)) {
-      response.status(401).json({
-        error: { code: "UNAUTHORIZED", message: "A valid AI API bearer token is required" },
-      });
-      return;
-    }
     next();
   });
   app.use(express.json({ limit: "1mb", strict: true }));
@@ -225,13 +270,13 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   app.get("/api/health", (_request, response, next) => {
     try {
       const result = db.prepare("SELECT 1 AS ok").get() as { ok: number };
-      const applicationAuthReady = !production || Boolean(appAuthUsername && appAuthPassword);
-      const ready = result.ok === 1 && applicationAuthReady;
+      const ready = result.ok === 1;
       const health = {
         status: ready ? "ok" : "degraded",
         database: { status: result.ok === 1 ? "ok" : "error" },
         authentication: {
-          status: applicationAuthReady ? "ok" : "misconfigured",
+          status: "ok",
+          registration: registrationMode,
         },
         timestamp: new Date().toISOString(),
       };
@@ -241,58 +286,211 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     }
   });
 
+  const sessionPayload = (authenticated: AuthenticatedSession) => ({
+    authenticated: true as const,
+    user: authenticated.user,
+    csrfToken: authenticated.session.csrfToken,
+  });
+  const setSessionCookie = (response: Response, created: ReturnType<AuthService["createSession"]>) => {
+    response.setHeader("Set-Cookie", authService.serializeSessionCookie(created));
+  };
+  const sessionMetadata = (request: Request) => ({
+    userAgent: request.header("user-agent"),
+    ip: request.ip,
+  });
+
+  app.get("/api/auth/session", (request, response) => {
+    const token = authService.sessionTokenFromCookie(request.header("cookie"));
+    const authenticated = authService.getSession(token);
+    if (!authenticated) {
+      response.json(data({ authenticated: false as const }));
+      return;
+    }
+    response.json(data(sessionPayload(authenticated)));
+  });
+
+  app.post("/api/auth/register", asyncRoute(async (request, response) => {
+    assertSameOrigin(request, configuredOrigin);
+    registrationLimiter.consume(request.ip || "unknown");
+    if (registrationMode !== "open") {
+      throw new AuthError("Registration is currently closed", 403, "REGISTRATION_CLOSED");
+    }
+    const user = await authService.register({
+      username: request.body?.username,
+      email: request.body?.email,
+      password: request.body?.password,
+    });
+    const created = authService.createSession(user.id, sessionMetadata(request));
+    setSessionCookie(response, created);
+    response.status(201).json(data(sessionPayload(created), "Account created"));
+  }));
+
+  app.post("/api/auth/login", asyncRoute(async (request, response) => {
+    assertSameOrigin(request, configuredOrigin);
+    const clientIp = request.ip || "unknown";
+    const identifier = typeof request.body?.identifier === "string"
+      ? request.body.identifier.trim().toLowerCase().slice(0, 254)
+      : "invalid";
+    loginIpLimiter.consume(clientIp);
+    loginAccountLimiter.consume(`${clientIp}:${identifier}`);
+    const created = await authService.login({
+      identifier: request.body?.identifier,
+      password: request.body?.password,
+    }, sessionMetadata(request));
+    setSessionCookie(response, created);
+    response.json(data(sessionPayload(created), "Signed in"));
+  }));
+
+  app.post("/api/auth/logout", (request, response) => {
+    assertSameOrigin(request, configuredOrigin);
+    const token = authService.sessionTokenFromCookie(request.header("cookie"));
+    const authenticated = authService.getSession(token, false);
+    if (!authenticated) throw new AuthError("Sign in is required", 401, "UNAUTHENTICATED");
+    authService.requireCsrf(authenticated.session, request.header("x-csrf-token"));
+    authService.revokeSession(token);
+    response.setHeader("Set-Cookie", authService.serializeClearedSessionCookie());
+    response.json(data({ loggedOut: true as const }, "Signed out"));
+  });
+
+  app.use("/api/ai", (request, response, next) => {
+    if (authenticationDisabled) {
+      response.locals.finance = createRequestServices(DEFAULT_OWNER_ID);
+      next();
+      return;
+    }
+    const requiredScopes = request.method === "GET" ? ["ai:read"] : ["finance:write"];
+    const principal = authService.authenticateApiToken(bearerToken(request), requiredScopes);
+    if (!principal) {
+      response.status(401).json({
+        error: { code: "UNAUTHORIZED", message: "A valid user API bearer token is required" },
+      });
+      return;
+    }
+    response.locals.finance = createRequestServices(principal.user.id, { apiPrincipal: principal });
+    next();
+  });
+
+  app.get("/api/ai/capabilities", (_request, response) => {
+    response.json(data({
+      ...getAICommandCapabilities(publicAICommandEndpoint),
+      authentication: "bearer-user-token",
+    }));
+  });
+
+  app.post("/api/ai/commands/execute", (request, response) => {
+    const result = services(response).commandService.execute(request.body);
+    const status = result.status === "failed" ? 409 : result.replayed ? 200 : 201;
+    response.status(status).json(data(result));
+  });
+
+  app.use("/api", (request, response, next) => {
+    if (authenticationDisabled) {
+      response.locals.finance = createRequestServices(DEFAULT_OWNER_ID);
+      next();
+      return;
+    }
+    const token = authService.sessionTokenFromCookie(request.header("cookie"));
+    const authenticated = authService.getSession(token);
+    if (!authenticated) {
+      response.status(401).json({
+        error: { code: "UNAUTHENTICATED", message: "Sign in is required" },
+      });
+      return;
+    }
+    if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+      assertSameOrigin(request, configuredOrigin);
+      authService.requireCsrf(authenticated.session, request.header("x-csrf-token"));
+    }
+    response.locals.finance = createRequestServices(authenticated.user.id, {
+      session: authenticated,
+    });
+    next();
+  });
+
+  app.get("/api/account/api-tokens", (_request, response) => {
+    const authenticated = services(response).session;
+    if (!authenticated) throw new AuthError("Sign in is required", 401, "UNAUTHENTICATED");
+    response.json(data(authService.listApiTokens(authenticated.user.id)));
+  });
+
+  app.post("/api/account/api-tokens", (request, response) => {
+    const authenticated = services(response).session;
+    if (!authenticated) throw new AuthError("Sign in is required", 401, "UNAUTHENTICATED");
+    const created = authService.createApiToken(authenticated.user.id, {
+      name: request.body?.name,
+      scopes: request.body?.scopes,
+      expiresAt: request.body?.expiresAt,
+    });
+    response.status(201).json(data(created, "API token created"));
+  });
+
+  app.delete("/api/account/api-tokens/:id", (request, response) => {
+    const authenticated = services(response).session;
+    if (!authenticated) throw new AuthError("Sign in is required", 401, "UNAUTHENTICATED");
+    const id = parse(entityId, request.params.id);
+    if (!authService.revokeApiToken(authenticated.user.id, id)) {
+      throw new AuthError("API token not found", 404, "API_TOKEN_NOT_FOUND");
+    }
+    response.json(data({ id, revoked: true }, "API token revoked"));
+  });
+
   app.get("/api/dashboard", (_request, response) => {
-    response.json(data(repository.getDashboard()));
+    response.json(data(services(response).repository.getDashboard()));
   });
 
   app.get("/api/assets", (request, response) => {
     const kind = typeof request.query.kind === "string" ? request.query.kind : undefined;
-    const assets = repository.listAssets().filter((asset) => kind === undefined || asset.kind === kind);
+    const assets = services(response).repository
+      .listAssets()
+      .filter((asset) => kind === undefined || asset.kind === kind);
     response.json(data(assets));
   });
 
   app.post("/api/assets", (request, response) => {
     const input = parse(assetCreateSchema, request.body);
-    response.status(201).json(data(repository.createAsset(input), "Asset created"));
+    response.status(201).json(data(services(response).repository.createAsset(input), "Asset created"));
   });
 
   app.get("/api/assets/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.getAsset(id)));
+    response.json(data(services(response).repository.getAsset(id)));
   });
 
   app.patch("/api/assets/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
     const input = parse(assetPatchSchema, request.body);
-    response.json(data(repository.updateAsset(id, input), "Asset updated"));
+    response.json(data(services(response).repository.updateAsset(id, input), "Asset updated"));
   });
 
   app.delete("/api/assets/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
-    repository.deleteAsset(id);
+    services(response).repository.deleteAsset(id);
     response.json(data({ id, deleted: true }, "Asset deleted"));
   });
 
   app.get("/api/assets/:id/operations", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.listOperations(id)));
+    response.json(data(services(response).repository.listOperations(id)));
   });
 
   app.post("/api/assets/:id/operations", (request, response) => {
     const id = parse(entityId, request.params.id);
     const input = parse(operationCreateSchema, request.body);
-    response.status(201).json(data(repository.recordOperation(id, input), "Operation recorded"));
+    response.status(201).json(
+      data(services(response).repository.recordOperation(id, input), "Operation recorded"),
+    );
   });
 
   app.get("/api/assets/:id/price", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.listPrices(id)));
+    response.json(data(services(response).repository.listPrices(id)));
   });
 
   const updatePriceHandler = asyncRoute(async (request, response) => {
     const id = parse(entityId, request.params.id);
     const input = parse(priceUpdateSchema, request.body ?? {});
-    const asset = repository.getAsset(id);
+    const ownerRepository = services(response).repository;
+    const asset = ownerRepository.getAsset(id);
     const quote = input.price
       ? {
           price: input.price,
@@ -303,14 +501,14 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
         }
       : await priceProvider.getQuote(asset);
     quote.price = nonNegativeDecimalString.parse(quote.price);
-    response.json(data(repository.updatePrice(id, quote), "Price updated"));
+    response.json(data(ownerRepository.updatePrice(id, quote), "Price updated"));
   });
   app.post("/api/assets/:id/price", updatePriceHandler);
   app.patch("/api/assets/:id/price", updatePriceHandler);
 
   app.get("/api/expected", (request, response) => {
     const stage = typeof request.query.stage === "string" ? request.query.stage : undefined;
-    const assets = repository
+    const assets = services(response).repository
       .listExpectedAssets()
       .filter((asset) => stage === undefined || asset.stage === stage);
     response.json(data(assets));
@@ -318,54 +516,63 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
 
   app.post("/api/expected", (request, response) => {
     const input = parse(expectedCreateSchema, request.body);
-    response.status(201).json(data(repository.createExpectedAsset(input), "Expected asset created"));
+    response.status(201).json(
+      data(services(response).repository.createExpectedAsset(input), "Expected asset created"),
+    );
   });
 
   app.get("/api/expected/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.getExpectedAsset(id)));
+    response.json(data(services(response).repository.getExpectedAsset(id)));
   });
 
   app.patch("/api/expected/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
     const input = parse(expectedPatchSchema, request.body);
-    response.json(data(repository.updateExpectedAsset(id, input), "Expected asset updated"));
+    response.json(
+      data(services(response).repository.updateExpectedAsset(id, input), "Expected asset updated"),
+    );
   });
 
   app.delete("/api/expected/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
-    repository.deleteExpectedAsset(id);
+    services(response).repository.deleteExpectedAsset(id);
     response.json(data({ id, deleted: true }, "Expected asset deleted"));
   });
 
   app.get("/api/expected/:id/updates", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.listExpectedUpdates(id)));
+    response.json(data(services(response).repository.listExpectedUpdates(id)));
   });
 
   app.get("/api/expected/:id/runs", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.listExpectedRuns(id)));
+    response.json(data(services(response).repository.listExpectedRuns(id)));
   });
 
   app.post(
     "/api/expected/:id/check",
     asyncRoute(async (request, response) => {
       const id = parse(entityId, request.params.id);
-      const run = await monitorService.runExpectedCheck(id);
-      response.json(data({ expected: repository.getExpectedAsset(id), run }, "Expected asset checked"));
+      const requestServices = services(response);
+      const run = await requestServices.monitorService.runExpectedCheck(id);
+      response.json(data({
+        expected: requestServices.repository.getExpectedAsset(id),
+        run,
+      }, "Expected asset checked"));
     }),
   );
 
   app.post("/api/expected/:id/convert", (request, response) => {
     const id = parse(entityId, request.params.id);
     const input = parse(expectedConvertSchema, request.body);
-    const expected = repository.getExpectedAsset(id);
+    const ownerRepository = services(response).repository;
+    const expected = ownerRepository.getExpectedAsset(id);
     if (expected.linkedAssetId) {
       throw new DomainError("Expected asset has already been converted", 409, "ALREADY_CONVERTED");
     }
     const convert = db.transaction(() => {
-      const asset = repository.createAsset({
+      const asset = ownerRepository.createAsset({
         name: input.name ?? expected.name,
         symbol: input.symbol,
         kind: input.kind,
@@ -379,7 +586,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
         staleAfterHours: 24,
         notes: [input.notes, `Converted from expected asset ${expected.id}`].filter(Boolean).join("\n"),
       });
-      repository.recordOperation(asset.id, {
+      ownerRepository.recordOperation(asset.id, {
         type: "claim",
         quantity: input.quantity,
         unitPrice: input.unitCost,
@@ -393,36 +600,47 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
         UPDATE expected_assets
         SET stage = 'claimed', health = 'healthy', linked_asset_id = ?,
             latest_update = ?, version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(asset.id, `Converted to holding ${asset.symbol}`, now, expected.id);
-      return repository.getAsset(asset.id);
+        WHERE owner_id = ? AND id = ?
+      `).run(
+        asset.id,
+        `Converted to holding ${asset.symbol}`,
+        now,
+        ownerRepository.ownerId,
+        expected.id,
+      );
+      return ownerRepository.getAsset(asset.id);
     });
     response.status(201).json(
-      data({ asset: convert(), expected: repository.getExpectedAsset(id) }, "Converted to direct asset"),
+      data({ asset: convert(), expected: ownerRepository.getExpectedAsset(id) }, "Converted to direct asset"),
     );
   });
 
   app.get("/api/events", (request, response) => {
     const status = typeof request.query.status === "string" ? request.query.status : undefined;
-    const events = repository.listEvents().filter((event) => status === undefined || event.status === status);
+    const events = services(response).repository
+      .listEvents()
+      .filter((event) => status === undefined || event.status === status);
     response.json(data(events));
   });
 
   app.post("/api/events", (request, response) => {
     const input = parse(eventCreateSchema, request.body);
     const nextRunAt = calculateNextRunAt(input.schedule, input.timezone);
-    response.status(201).json(data(repository.createEvent(input, nextRunAt), "Tracked event created"));
+    response.status(201).json(
+      data(services(response).repository.createEvent(input, nextRunAt), "Tracked event created"),
+    );
   });
 
   app.get("/api/events/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.getEvent(id)));
+    response.json(data(services(response).repository.getEvent(id)));
   });
 
   app.patch("/api/events/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
     const input = parse(eventPatchSchema, request.body);
-    const current = repository.getEvent(id);
+    const ownerRepository = services(response).repository;
+    const current = ownerRepository.getEvent(id);
     let nextRunAt: string | null | undefined;
     if (
       input.schedule !== undefined ||
@@ -434,12 +652,12 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
         input.timezone ?? current.timezone,
       );
     }
-    response.json(data(repository.updateEvent(id, input, nextRunAt), "Tracked event updated"));
+    response.json(data(ownerRepository.updateEvent(id, input, nextRunAt), "Tracked event updated"));
   });
 
   app.delete("/api/events/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
-    repository.deleteEvent(id);
+    services(response).repository.deleteEvent(id);
     response.json(data({ id, deleted: true }, "Tracked event deleted"));
   });
 
@@ -447,41 +665,45 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     "/api/events/:id/run",
     asyncRoute(async (request, response) => {
       const id = parse(entityId, request.params.id);
-      const run = await monitorService.runEvent(id);
+      const run = await services(response).monitorService.runEvent(id);
       response.status(201).json(data(run, "Event run completed"));
     }),
   );
 
   app.get("/api/events/:id/runs", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.listEventRuns(id)));
+    response.json(data(services(response).repository.listEventRuns(id)));
   });
 
   app.get("/api/runs/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
-    response.json(data(repository.getRun(id)));
+    response.json(data(services(response).repository.getRun(id)));
   });
 
   app.get("/api/settings", (_request, response) => {
-    response.json(data(repository.getSettings()));
+    response.json(data(services(response).repository.getSettings()));
   });
 
   app.patch("/api/settings", (request, response) => {
     const input = parse(settingsPatchSchema, request.body);
-    response.json(data(repository.updateSettings(input), "Settings saved"));
+    response.json(data(services(response).repository.updateSettings(input), "Settings saved"));
   });
 
-  const testConnection = async (kind: string) => {
-    if (kind === "ai") return aiProvider.testConnection();
+  const testConnection = async (kind: string, response: Response) => {
+    const requestServices = services(response);
+    if (kind === "ai") return aiProviderFor(requestServices.repository).testConnection();
     if (kind === "price") return priceProvider.testConnection();
-    if (kind === "email" || kind === "smtp") return emailOutbox.testConnection();
+    if (kind === "email" || kind === "smtp") return requestServices.emailOutbox.testConnection();
     throw new DomainError("Unknown connection type", 404, "CONNECTION_TYPE_NOT_FOUND");
   };
   app.post(
     "/api/settings/connections/:kind/test",
     asyncRoute(async (request, response) => {
       const rawKind = request.params.kind;
-      const result = await testConnection(Array.isArray(rawKind) ? rawKind[0] ?? "" : rawKind);
+      const result = await testConnection(
+        Array.isArray(rawKind) ? rawKind[0] ?? "" : rawKind,
+        response,
+      );
       response.status(result.ok ? 200 : result.status === "failed" ? 502 : 409).json(data(result));
     }),
   );
@@ -489,24 +711,11 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     app.post(
       `/api/settings/test-${kind}`,
       asyncRoute(async (_request, response) => {
-        const result = await testConnection(kind);
+        const result = await testConnection(kind, response);
         response.status(result.ok ? 200 : result.status === "failed" ? 502 : 409).json(data(result));
       }),
     );
   }
-
-  app.get("/api/ai/capabilities", (_request, response) => {
-    response.json(data({
-      ...getAICommandCapabilities(publicAICommandEndpoint),
-      authentication: aiApiToken ? "bearer" : "local-development-only",
-    }));
-  });
-
-  app.post("/api/ai/commands/execute", (request, response) => {
-    const result = commandService.execute(request.body);
-    const status = result.status === "failed" ? 409 : result.replayed ? 200 : 201;
-    response.status(status).json(data(result));
-  });
 
   const shouldServeStatic = options.serveStatic ?? production;
   const staticPath = resolve(options.staticPath ?? "dist");
@@ -537,6 +746,12 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
           message: "Request validation failed",
           issues: error.issues,
         },
+      });
+      return;
+    }
+    if (error instanceof AuthError) {
+      response.status(error.status).json({
+        error: { code: error.code, message: error.message },
       });
       return;
     }

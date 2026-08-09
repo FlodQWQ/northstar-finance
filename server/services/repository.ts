@@ -8,7 +8,7 @@ import type {
   MonitorRun,
   TrackedEvent,
 } from "../../shared/types";
-import type { SqliteDatabase } from "../db/database";
+import { DEFAULT_OWNER_ID, type SqliteDatabase } from "../db/database";
 import type {
   AssetCreateInput,
   AssetPatchInput,
@@ -167,14 +167,20 @@ export function mapMonitorRun(row: Row): MonitorRun {
 }
 
 export class FinanceRepository {
-  public constructor(public readonly db: SqliteDatabase) {}
+  public constructor(
+    public readonly db: SqliteDatabase,
+    public readonly ownerId = DEFAULT_OWNER_ID,
+  ) {}
 
   public listAssets(): VersionedAsset[] {
-    return (this.db.prepare("SELECT * FROM assets ORDER BY name COLLATE NOCASE").all() as Row[]).map(mapAsset);
+    return (this.db.prepare(`
+      SELECT * FROM assets WHERE owner_id = ? ORDER BY name COLLATE NOCASE
+    `).all(this.ownerId) as Row[]).map(mapAsset);
   }
 
   public getAsset(id: string): VersionedAsset {
-    const row = this.db.prepare("SELECT * FROM assets WHERE id = ?").get(id) as Row | undefined;
+    const row = this.db.prepare("SELECT * FROM assets WHERE owner_id = ? AND id = ?")
+      .get(this.ownerId, id) as Row | undefined;
     if (!row) throw new DomainError("Asset not found", 404, "ASSET_NOT_FOUND");
     return mapAsset(row);
   }
@@ -187,12 +193,13 @@ export class FinanceRepository {
     const create = this.db.transaction(() => {
       this.db.prepare(`
         INSERT INTO assets (
-          id, name, symbol, kind, account, currency, quantity, unit_cost,
+          id, owner_id, name, symbol, kind, account, currency, quantity, unit_cost,
           current_price, price_mode, price_source, price_updated_at,
           stale_after_hours, notes, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
       `).run(
         id,
+        this.ownerId,
         input.name,
         input.symbol,
         input.kind,
@@ -213,11 +220,12 @@ export class FinanceRepository {
       if (!new Decimal(input.quantity).isZero()) {
         this.db.prepare(`
           INSERT INTO asset_operations (
-            id, asset_id, operation_type, quantity_delta, unit_price, fee,
+            id, owner_id, asset_id, operation_type, quantity_delta, unit_price, fee,
             currency, note, occurred_at, idempotency_key, created_at
-          ) VALUES (?, ?, 'opening', ?, ?, '0', ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, 'opening', ?, ?, '0', ?, ?, ?, ?, ?)
         `).run(
           randomUUID(),
+          this.ownerId,
           id,
           input.quantity,
           input.unitCost,
@@ -232,10 +240,11 @@ export class FinanceRepository {
       if (!new Decimal(input.currentPrice).isZero()) {
         this.db.prepare(`
           INSERT INTO price_snapshots (
-            id, asset_id, price, currency, source, as_of_at, fetched_at, raw_json, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
+            id, owner_id, asset_id, price, currency, source, as_of_at, fetched_at, raw_json, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
         `).run(
           randomUUID(),
+          this.ownerId,
           id,
           input.currentPrice,
           input.currency,
@@ -278,18 +287,19 @@ export class FinanceRepository {
       const assignments = entries.map(([key]) => `${columnMap[key]} = ?`);
       const values = entries.map(([, value]) => value);
       this.db.prepare(
-        `UPDATE assets SET ${assignments.join(", ")}, version = version + 1, updated_at = ? WHERE id = ?`,
-      ).run(...values, now, id);
+        `UPDATE assets SET ${assignments.join(", ")}, version = version + 1, updated_at = ? WHERE owner_id = ? AND id = ?`,
+      ).run(...values, now, this.ownerId, id);
 
       if (input.quantity !== undefined && input.quantity !== current.quantity) {
         const delta = new Decimal(input.quantity).minus(current.quantity);
         this.db.prepare(`
           INSERT INTO asset_operations (
-            id, asset_id, operation_type, quantity_delta, unit_price, fee,
+            id, owner_id, asset_id, operation_type, quantity_delta, unit_price, fee,
             currency, note, occurred_at, idempotency_key, created_at
-          ) VALUES (?, ?, 'adjustment', ?, ?, '0', ?, ?, ?, NULL, ?)
+          ) VALUES (?, ?, ?, 'adjustment', ?, ?, '0', ?, ?, ?, NULL, ?)
         `).run(
           randomUUID(),
+          this.ownerId,
           id,
           formatDecimal(delta),
           input.unitCost ?? current.unitCost,
@@ -304,10 +314,11 @@ export class FinanceRepository {
         const asOf = normalizedInput.priceUpdatedAt ?? now;
         this.db.prepare(`
           INSERT OR IGNORE INTO price_snapshots (
-            id, asset_id, price, currency, source, as_of_at, fetched_at, raw_json, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
+            id, owner_id, asset_id, price, currency, source, as_of_at, fetched_at, raw_json, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
         `).run(
           randomUUID(),
+          this.ownerId,
           id,
           input.currentPrice,
           input.currency ?? current.currency,
@@ -323,7 +334,8 @@ export class FinanceRepository {
   }
 
   public deleteAsset(id: string): void {
-    const result = this.db.prepare("DELETE FROM assets WHERE id = ?").run(id);
+    const result = this.db.prepare("DELETE FROM assets WHERE owner_id = ? AND id = ?")
+      .run(this.ownerId, id);
     if (result.changes === 0) throw new DomainError("Asset not found", 404, "ASSET_NOT_FOUND");
   }
 
@@ -333,9 +345,9 @@ export class FinanceRepository {
       SELECT id, asset_id, operation_type, quantity_delta, unit_price, fee,
              currency, note, occurred_at, idempotency_key, created_at
       FROM asset_operations
-      WHERE asset_id = ?
+      WHERE owner_id = ? AND asset_id = ?
       ORDER BY occurred_at DESC, created_at DESC
-    `).all(assetId) as Row[]).map((row) => ({
+    `).all(this.ownerId, assetId) as Row[]).map((row) => ({
       id: row.id,
       assetId: row.asset_id,
       type: row.operation_type,
@@ -354,8 +366,8 @@ export class FinanceRepository {
     const asset = this.getAsset(assetId);
     if (input.idempotencyKey) {
       const existing = this.db.prepare(
-        "SELECT * FROM asset_operations WHERE asset_id = ? AND idempotency_key = ?",
-      ).get(assetId, input.idempotencyKey) as Row | undefined;
+        "SELECT * FROM asset_operations WHERE owner_id = ? AND asset_id = ? AND idempotency_key = ?",
+      ).get(this.ownerId, assetId, input.idempotencyKey) as Row | undefined;
       if (existing) return this.listOperations(assetId).find((item) => item.id === existing.id) ?? existing;
     }
 
@@ -397,11 +409,12 @@ export class FinanceRepository {
     const write = this.db.transaction(() => {
       this.db.prepare(`
         INSERT INTO asset_operations (
-          id, asset_id, operation_type, quantity_delta, unit_price, fee,
+          id, owner_id, asset_id, operation_type, quantity_delta, unit_price, fee,
           currency, note, occurred_at, idempotency_key, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
+        this.ownerId,
         assetId,
         input.type,
         formatDecimal(delta),
@@ -416,8 +429,8 @@ export class FinanceRepository {
       this.db.prepare(`
         UPDATE assets
         SET quantity = ?, unit_cost = ?, version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(formatDecimal(nextQuantity), formatDecimal(nextUnitCost), now, assetId);
+        WHERE owner_id = ? AND id = ?
+      `).run(formatDecimal(nextQuantity), formatDecimal(nextUnitCost), now, this.ownerId, assetId);
     });
     write();
     return this.listOperations(assetId).find((item) => item.id === id) as Row;
@@ -432,10 +445,11 @@ export class FinanceRepository {
     const write = this.db.transaction(() => {
       this.db.prepare(`
         INSERT OR IGNORE INTO price_snapshots (
-          id, asset_id, price, currency, source, as_of_at, fetched_at, raw_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, owner_id, asset_id, price, currency, source, as_of_at, fetched_at, raw_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         randomUUID(),
+        this.ownerId,
         assetId,
         quote.price,
         quote.currency,
@@ -449,8 +463,8 @@ export class FinanceRepository {
         UPDATE assets
         SET current_price = ?, currency = ?, price_source = ?, price_updated_at = ?,
             version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(quote.price, quote.currency, quote.source, quote.asOf, now, assetId);
+        WHERE owner_id = ? AND id = ?
+      `).run(quote.price, quote.currency, quote.source, quote.asOf, now, this.ownerId, assetId);
     });
     write();
     return this.getAsset(assetId);
@@ -460,8 +474,8 @@ export class FinanceRepository {
     this.getAsset(assetId);
     return (this.db.prepare(`
       SELECT id, price, currency, source, as_of_at, fetched_at
-      FROM price_snapshots WHERE asset_id = ? ORDER BY as_of_at DESC LIMIT 500
-    `).all(assetId) as Row[]).map((row) => ({
+      FROM price_snapshots WHERE owner_id = ? AND asset_id = ? ORDER BY as_of_at DESC LIMIT 500
+    `).all(this.ownerId, assetId) as Row[]).map((row) => ({
       id: row.id,
       assetId,
       price: row.price,
@@ -473,11 +487,16 @@ export class FinanceRepository {
   }
 
   public listExpectedAssets(): VersionedExpectedAsset[] {
-    return (this.db.prepare("SELECT * FROM expected_assets ORDER BY next_check_at, name COLLATE NOCASE").all() as Row[]).map(mapExpectedAsset);
+    return (this.db.prepare(`
+      SELECT * FROM expected_assets
+      WHERE owner_id = ?
+      ORDER BY next_check_at, name COLLATE NOCASE
+    `).all(this.ownerId) as Row[]).map(mapExpectedAsset);
   }
 
   public getExpectedAsset(id: string): VersionedExpectedAsset {
-    const row = this.db.prepare("SELECT * FROM expected_assets WHERE id = ?").get(id) as Row | undefined;
+    const row = this.db.prepare("SELECT * FROM expected_assets WHERE owner_id = ? AND id = ?")
+      .get(this.ownerId, id) as Row | undefined;
     if (!row) throw new DomainError("Expected asset not found", 404, "EXPECTED_ASSET_NOT_FOUND");
     return mapExpectedAsset(row);
   }
@@ -489,13 +508,14 @@ export class FinanceRepository {
     const nextCheckAt = input.nextCheckAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     this.db.prepare(`
       INSERT INTO expected_assets (
-        id, name, category, ecosystem, stage, health, next_action, deadline,
+        id, owner_id, name, category, ecosystem, stage, health, next_action, deadline,
         estimated_low, estimated_high, currency, invested_cost, confidence,
         source_url, keywords_json, latest_update, last_checked_at, next_check_at,
         notes, linked_asset_id, version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
     `).run(
       id,
+      this.ownerId,
       input.name,
       input.category,
       input.ecosystem,
@@ -552,13 +572,14 @@ export class FinanceRepository {
     const values = entries.map(([key, value]) => (key === "keywords" ? JSON.stringify(value) : value));
     const now = new Date().toISOString();
     this.db.prepare(
-      `UPDATE expected_assets SET ${assignments.join(", ")}, version = version + 1, updated_at = ? WHERE id = ?`,
-    ).run(...values, now, id);
+      `UPDATE expected_assets SET ${assignments.join(", ")}, version = version + 1, updated_at = ? WHERE owner_id = ? AND id = ?`,
+    ).run(...values, now, this.ownerId, id);
     return this.getExpectedAsset(id);
   }
 
   public deleteExpectedAsset(id: string): void {
-    const result = this.db.prepare("DELETE FROM expected_assets WHERE id = ?").run(id);
+    const result = this.db.prepare("DELETE FROM expected_assets WHERE owner_id = ? AND id = ?")
+      .run(this.ownerId, id);
     if (result.changes === 0) {
       throw new DomainError("Expected asset not found", 404, "EXPECTED_ASSET_NOT_FOUND");
     }
@@ -567,8 +588,10 @@ export class FinanceRepository {
   public listExpectedUpdates(id: string): Row[] {
     this.getExpectedAsset(id);
     return (this.db.prepare(`
-      SELECT * FROM asset_updates WHERE expected_asset_id = ? ORDER BY created_at DESC
-    `).all(id) as Row[]).map((row) => ({
+      SELECT * FROM asset_updates
+      WHERE owner_id = ? AND expected_asset_id = ?
+      ORDER BY created_at DESC
+    `).all(this.ownerId, id) as Row[]).map((row) => ({
       id: row.id,
       expectedAssetId: row.expected_asset_id,
       type: row.update_type,
@@ -584,19 +607,23 @@ export class FinanceRepository {
   public listExpectedRuns(expectedAssetId: string): MonitorRun[] {
     this.getExpectedAsset(expectedAssetId);
     return (this.db.prepare(`
-      SELECT * FROM monitor_runs WHERE expected_asset_id = ? ORDER BY scheduled_for DESC LIMIT 200
-    `).all(expectedAssetId) as Row[]).map(mapMonitorRun);
+      SELECT * FROM monitor_runs
+      WHERE owner_id = ? AND expected_asset_id = ?
+      ORDER BY scheduled_for DESC LIMIT 200
+    `).all(this.ownerId, expectedAssetId) as Row[]).map(mapMonitorRun);
   }
 
   public listEvents(): VersionedTrackedEvent[] {
     return (this.db.prepare(`
       SELECT * FROM tracked_events
+      WHERE owner_id = ?
       ORDER BY CASE WHEN next_run_at IS NULL THEN 1 ELSE 0 END, next_run_at, name COLLATE NOCASE
-    `).all() as Row[]).map(mapTrackedEvent);
+    `).all(this.ownerId) as Row[]).map(mapTrackedEvent);
   }
 
   public getEvent(id: string): VersionedTrackedEvent {
-    const row = this.db.prepare("SELECT * FROM tracked_events WHERE id = ?").get(id) as Row | undefined;
+    const row = this.db.prepare("SELECT * FROM tracked_events WHERE owner_id = ? AND id = ?")
+      .get(this.ownerId, id) as Row | undefined;
     if (!row) throw new DomainError("Tracked event not found", 404, "EVENT_NOT_FOUND");
     return mapTrackedEvent(row);
   }
@@ -606,12 +633,13 @@ export class FinanceRepository {
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO tracked_events (
-        id, name, topic, instructions, schedule, schedule_label, timezone,
+        id, owner_id, name, topic, instructions, schedule, schedule_label, timezone,
         next_run_at, last_run_at, status, notify_on_change_only, email_enabled,
         email_to, last_run_status, last_summary, version, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, '', 1, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, '', 1, ?, ?)
     `).run(
       id,
+      this.ownerId,
       input.name,
       input.topic,
       input.instructions,
@@ -668,31 +696,36 @@ export class FinanceRepository {
     );
     const now = new Date().toISOString();
     this.db.prepare(
-      `UPDATE tracked_events SET ${assignments.join(", ")}, version = version + 1, updated_at = ? WHERE id = ?`,
-    ).run(...values, now, id);
+      `UPDATE tracked_events SET ${assignments.join(", ")}, version = version + 1, updated_at = ? WHERE owner_id = ? AND id = ?`,
+    ).run(...values, now, this.ownerId, id);
     return this.getEvent(id);
   }
 
   public deleteEvent(id: string): void {
-    const result = this.db.prepare("DELETE FROM tracked_events WHERE id = ?").run(id);
+    const result = this.db.prepare("DELETE FROM tracked_events WHERE owner_id = ? AND id = ?")
+      .run(this.ownerId, id);
     if (result.changes === 0) throw new DomainError("Tracked event not found", 404, "EVENT_NOT_FOUND");
   }
 
   public listEventRuns(eventId: string): MonitorRun[] {
     this.getEvent(eventId);
     return (this.db.prepare(`
-      SELECT * FROM monitor_runs WHERE event_id = ? ORDER BY scheduled_for DESC LIMIT 200
-    `).all(eventId) as Row[]).map(mapMonitorRun);
+      SELECT * FROM monitor_runs
+      WHERE owner_id = ? AND event_id = ?
+      ORDER BY scheduled_for DESC LIMIT 200
+    `).all(this.ownerId, eventId) as Row[]).map(mapMonitorRun);
   }
 
   public getRun(id: string): MonitorRun {
-    const row = this.db.prepare("SELECT * FROM monitor_runs WHERE id = ?").get(id) as Row | undefined;
+    const row = this.db.prepare("SELECT * FROM monitor_runs WHERE owner_id = ? AND id = ?")
+      .get(this.ownerId, id) as Row | undefined;
     if (!row) throw new DomainError("Monitor run not found", 404, "RUN_NOT_FOUND");
     return mapMonitorRun(row);
   }
 
   public getSettings(): AppSettings {
-    const rows = this.db.prepare("SELECT key, value FROM settings").all() as Array<{ key: string; value: string }>;
+    const rows = this.db.prepare("SELECT key, value FROM settings WHERE owner_id = ?")
+      .all(this.ownerId) as Array<{ key: string; value: string }>;
     const values = Object.fromEntries(rows.map((row) => [row.key, row.value]));
     const configuredAiProvider = values.aiProvider ?? "none";
     const aiProvider = configuredAiProvider === "none" ? "disabled" : configuredAiProvider;
@@ -721,13 +754,14 @@ export class FinanceRepository {
     const derivedKeys = new Set(["aiConfigured", "smtpConfigured"]);
     const now = new Date().toISOString();
     const statement = this.db.prepare(`
-      INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      INSERT INTO settings (owner_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(owner_id, key)
+      DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `);
     const update = this.db.transaction(() => {
       for (const [key, rawValue] of Object.entries(input)) {
         if (derivedKeys.has(key) || rawValue === undefined) continue;
-        statement.run(key, String(rawValue), now);
+        statement.run(this.ownerId, key, String(rawValue), now);
       }
     });
     update();
@@ -788,17 +822,17 @@ export class FinanceRepository {
       SELECT a.quantity,
              COALESCE((
                SELECT p.price FROM price_snapshots p
-               WHERE p.asset_id = a.id AND p.as_of_at <= ?
+               WHERE p.owner_id = a.owner_id AND p.asset_id = a.id AND p.as_of_at <= ?
                ORDER BY p.as_of_at DESC LIMIT 1
              ), a.current_price) AS price
       FROM assets a
-      WHERE a.currency = ?
+      WHERE a.owner_id = ? AND a.currency = ?
     `);
     for (let daysAgo = 6; daysAgo >= 0; daysAgo -= 1) {
       const day = new Date(now - daysAgo * 24 * 60 * 60 * 1000);
       const end = new Date(day);
       end.setUTCHours(23, 59, 59, 999);
-      const value = (trendStatement.all(end.toISOString(), baseCurrency) as Row[]).reduce(
+      const value = (trendStatement.all(end.toISOString(), this.ownerId, baseCurrency) as Row[]).reduce(
         (sum, row) => sum.plus(new Decimal(stringValue(row.quantity, "0")).mul(stringValue(row.price, "0"))),
         new Decimal(0),
       );
@@ -811,9 +845,10 @@ export class FinanceRepository {
              o.unit_price AS unitPrice, o.fee, o.currency, o.note,
              o.occurred_at AS occurredAt
       FROM asset_operations o
-      JOIN assets a ON a.id = o.asset_id
+      JOIN assets a ON a.owner_id = o.owner_id AND a.id = o.asset_id
+      WHERE o.owner_id = ?
       ORDER BY o.occurred_at DESC LIMIT 10
-    `).all() as Array<Record<string, unknown>>;
+    `).all(this.ownerId) as Array<Record<string, unknown>>;
 
     return {
       baseCurrency,

@@ -22,7 +22,9 @@ export class MonitorService {
     resumeExisting?: boolean;
   }): { runId: string; existing?: MonitorRun } {
     const dedupeKey = `${input.targetType}:${input.targetId}:${input.scheduledFor}`;
-    const existing = this.db.prepare("SELECT * FROM monitor_runs WHERE dedupe_key = ?").get(dedupeKey) as
+    const existing = this.db.prepare(`
+      SELECT * FROM monitor_runs WHERE owner_id = ? AND dedupe_key = ?
+    `).get(this.repository.ownerId, dedupeKey) as
       | Row
       | undefined;
     if (existing) {
@@ -36,12 +38,13 @@ export class MonitorService {
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO monitor_runs (
-        id, target_type, event_id, expected_asset_id, status, scheduled_for,
+        id, owner_id, target_type, event_id, expected_asset_id, status, scheduled_for,
         started_at, finished_at, summary, change_summary, sources_json,
         provider, email_status, error, dedupe_key, created_at
-      ) VALUES (?, ?, ?, ?, 'queued', ?, NULL, NULL, '', '', '[]', ?, 'skipped', '', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 'queued', ?, NULL, NULL, '', '', '[]', ?, 'skipped', '', ?, ?)
     `).run(
       runId,
+      this.repository.ownerId,
       input.targetType,
       input.targetType === "event" ? input.targetId : null,
       input.targetType === "expected" ? input.targetId : null,
@@ -58,7 +61,7 @@ export class MonitorService {
       UPDATE monitor_runs
       SET status = ?, finished_at = ?, summary = ?, change_summary = ?,
           sources_json = ?, provider = ?, error = ''
-      WHERE id = ?
+      WHERE owner_id = ? AND id = ?
     `).run(
       status,
       new Date().toISOString(),
@@ -66,6 +69,7 @@ export class MonitorService {
       result.changeSummary,
       JSON.stringify(result.sources),
       this.aiProvider.id,
+      this.repository.ownerId,
       runId,
     );
   }
@@ -75,8 +79,14 @@ export class MonitorService {
     this.db.prepare(`
       UPDATE monitor_runs
       SET status = 'failed', finished_at = ?, provider = ?, error = ?
-      WHERE id = ?
-    `).run(new Date().toISOString(), this.aiProvider.id, message.slice(0, 4_000), runId);
+      WHERE owner_id = ? AND id = ?
+    `).run(
+      new Date().toISOString(),
+      this.aiProvider.id,
+      message.slice(0, 4_000),
+      this.repository.ownerId,
+      runId,
+    );
   }
 
   public async runEvent(
@@ -93,10 +103,10 @@ export class MonitorService {
     });
     if (created.existing) return created.existing;
     const startedAt = new Date().toISOString();
-    this.db.prepare("UPDATE monitor_runs SET status = 'running', started_at = ? WHERE id = ?").run(
-      startedAt,
-      created.runId,
-    );
+    this.db.prepare(`
+      UPDATE monitor_runs SET status = 'running', started_at = ?
+      WHERE owner_id = ? AND id = ?
+    `).run(startedAt, this.repository.ownerId, created.runId);
 
     try {
       const result = await this.aiProvider.research({
@@ -113,8 +123,15 @@ export class MonitorService {
         UPDATE tracked_events
         SET last_run_at = ?, last_run_status = ?, last_summary = ?,
             version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(startedAt, status, result.summary, new Date().toISOString(), eventId);
+        WHERE owner_id = ? AND id = ?
+      `).run(
+        startedAt,
+        status,
+        result.summary,
+        new Date().toISOString(),
+        this.repository.ownerId,
+        eventId,
+      );
 
       const shouldEmail = event.emailEnabled && (!event.notifyOnChangeOnly || result.changed);
       if (shouldEmail) {
@@ -133,8 +150,8 @@ export class MonitorService {
         UPDATE tracked_events
         SET last_run_at = ?, last_run_status = 'failed',
             version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(startedAt, new Date().toISOString(), eventId);
+        WHERE owner_id = ? AND id = ?
+      `).run(startedAt, new Date().toISOString(), this.repository.ownerId, eventId);
     }
     return this.repository.getRun(created.runId);
   }
@@ -153,10 +170,10 @@ export class MonitorService {
     });
     if (created.existing) return created.existing;
     const startedAt = new Date().toISOString();
-    this.db.prepare("UPDATE monitor_runs SET status = 'running', started_at = ? WHERE id = ?").run(
-      startedAt,
-      created.runId,
-    );
+    this.db.prepare(`
+      UPDATE monitor_runs SET status = 'running', started_at = ?
+      WHERE owner_id = ? AND id = ?
+    `).run(startedAt, this.repository.ownerId, created.runId);
 
     try {
       const result = await this.aiProvider.research({
@@ -176,11 +193,12 @@ export class MonitorService {
         this.completeRun(created.runId, result, status);
         this.db.prepare(`
           INSERT INTO asset_updates (
-            id, expected_asset_id, update_type, title, summary, source_url,
+            id, owner_id, expected_asset_id, update_type, title, summary, source_url,
             provider, published_at, created_at
-          ) VALUES (?, ?, 'research', ?, ?, ?, ?, NULL, ?)
+          ) VALUES (?, ?, ?, 'research', ?, ?, ?, ?, NULL, ?)
         `).run(
           randomUUID(),
+          this.repository.ownerId,
           expectedAssetId,
           result.changed ? "Research update" : "Research check: no change",
           result.summary,
@@ -193,8 +211,8 @@ export class MonitorService {
           UPDATE expected_assets
           SET latest_update = ?, last_checked_at = ?, next_check_at = ?, health = 'healthy',
               version = version + 1, updated_at = ?
-          WHERE id = ?
-        `).run(result.summary, now, nextCheck, now, expectedAssetId);
+          WHERE owner_id = ? AND id = ?
+        `).run(result.summary, now, nextCheck, now, this.repository.ownerId, expectedAssetId);
       });
       write();
     } catch (error) {
@@ -203,8 +221,8 @@ export class MonitorService {
       this.db.prepare(`
         UPDATE expected_assets
         SET last_checked_at = ?, health = 'failed', version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(now, now, expectedAssetId);
+        WHERE owner_id = ? AND id = ?
+      `).run(now, now, this.repository.ownerId, expectedAssetId);
     }
     return this.repository.getRun(created.runId);
   }
@@ -213,11 +231,11 @@ export class MonitorService {
     const rows = this.db.prepare(`
       SELECT id, target_type, event_id, expected_asset_id, scheduled_for
       FROM monitor_runs
-      WHERE status IN ('queued', 'running')
+      WHERE owner_id = ? AND status IN ('queued', 'running')
         AND COALESCE(started_at, created_at) <= ?
       ORDER BY created_at
       LIMIT 20
-    `).all(cutoff.toISOString()) as Array<{
+    `).all(this.repository.ownerId, cutoff.toISOString()) as Array<{
       id: string;
       target_type: "event" | "expected";
       event_id: string | null;
@@ -231,16 +249,16 @@ export class MonitorService {
         this.db.prepare(`
           UPDATE monitor_runs
           SET status = 'failed', finished_at = ?, error = 'Target was deleted before recovery'
-          WHERE id = ?
-        `).run(new Date().toISOString(), row.id);
+          WHERE owner_id = ? AND id = ?
+        `).run(new Date().toISOString(), this.repository.ownerId, row.id);
         continue;
       }
       this.db.prepare(`
         UPDATE monitor_runs
         SET status = 'queued', started_at = NULL, finished_at = NULL,
             error = 'Recovered after an interrupted worker lease'
-        WHERE id = ? AND status IN ('queued', 'running')
-      `).run(row.id);
+        WHERE owner_id = ? AND id = ? AND status IN ('queued', 'running')
+      `).run(this.repository.ownerId, row.id);
       if (row.target_type === "event") {
         await this.runEvent(targetId, row.scheduled_for, true);
       } else {

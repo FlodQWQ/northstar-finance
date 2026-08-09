@@ -11,6 +11,7 @@ beforeEach(() => {
     seed: false,
     aiProvider: new MockAIProvider(),
     serveStatic: false,
+    disableAuthenticationForTests: true,
   });
 });
 

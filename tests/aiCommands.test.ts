@@ -1,11 +1,17 @@
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type FinanceApp } from "../server/app";
+import { FinanceRepository } from "../server/services/repository";
 
 let app: FinanceApp;
 
 beforeEach(() => {
-  app = createApp({ databasePath: ":memory:", seed: false, serveStatic: false });
+  app = createApp({
+    databasePath: ":memory:",
+    seed: false,
+    serveStatic: false,
+    disableAuthenticationForTests: true,
+  });
 });
 
 afterEach(() => {
@@ -242,7 +248,14 @@ describe("AI atomic command API", () => {
       databasePath: ":memory:",
       seed: false,
       serveStatic: false,
-      aiApiToken: "test-secret",
+    });
+    const user = await guarded.finance.authService.register({
+      username: "ai-owner",
+      password: "correct horse battery staple",
+    });
+    const apiToken = guarded.finance.authService.createApiToken(user.id, {
+      name: "Test agent",
+      scopes: ["ai:read", "finance:write"],
     });
     const payload = {
       idempotencyKey: "expected-create-1",
@@ -261,7 +274,7 @@ describe("AI atomic command API", () => {
       await request(guarded).post("/api/ai/commands/execute").send(payload).expect(401);
       const response = await request(guarded)
         .post("/api/ai/commands/execute")
-        .set("Authorization", "Bearer test-secret")
+        .set("Authorization", `Bearer ${apiToken.token}`)
         .send(payload)
         .expect(201);
       expect(response.body.data.results[0]).toMatchObject({
@@ -269,7 +282,8 @@ describe("AI atomic command API", () => {
         status: "applied",
         targetId: "expected-from-ai",
       });
-      expect(guarded.finance.repository.getExpectedAsset("expected-from-ai").stage).toBe("discovered");
+      expect(new FinanceRepository(guarded.finance.db, user.id)
+        .getExpectedAsset("expected-from-ai").stage).toBe("discovered");
     } finally {
       guarded.finance.close();
     }
@@ -295,6 +309,7 @@ describe("AI atomic command API", () => {
       seed: false,
       serveStatic: false,
       appBaseUrl: "https://la.134271.xyz/northstar",
+      disableAuthenticationForTests: true,
     });
 
     try {

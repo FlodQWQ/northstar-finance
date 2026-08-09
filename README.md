@@ -33,7 +33,7 @@ npm run build
 npm run start
 ```
 
-运行前需在 `.env` 中设置 `APP_AUTH_USERNAME` 和强随机 `APP_AUTH_PASSWORD`。生产模式下由单个 Express 进程在 `PORT=5888` 同源提供 API 与 `dist/` 静态文件。
+首次打开页面后在应用内注册账户。生产模式下由单个 Express 进程在 `PORT=5888` 同源提供 API 与 `dist/` 静态文件。
 
 ## 环境变量
 
@@ -50,9 +50,9 @@ npm run start
 | `TZ` | `Asia/Shanghai` | 调度与日志展示时区；持久化时间仍应使用 UTC |
 | `DATABASE_PATH` | `./data/finance.sqlite` | SQLite 文件路径；容器内为 `/app/data/finance.sqlite` |
 | `SEED_DEMO_DATA` | 开发为 `true`，生产为 `false` | 是否在空数据库中写入演示资产与事件 |
-| `APP_BASE_URL` | `http://127.0.0.1:5888` | AI capabilities、未来邮件链接及 OAuth 回调使用的公开地址 |
-| `APP_AUTH_USERNAME` | 空 | 生产页面与普通业务 API 的单用户 HTTP Basic 用户名；生产环境必填 |
-| `APP_AUTH_PASSWORD` | 空 | 强随机密码；生产环境必填且只能通过 HTTPS 使用 |
+| `APP_BASE_URL` | `http://127.0.0.1:5888` | 会话 Cookie Path、同源校验、AI capabilities 与未来邮件链接使用的公开地址 |
+| `REGISTRATION_MODE` | `open` | `open` 允许页面注册新账户；`closed` 仅允许已有账户登录 |
+| `APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD` | 空 | 仅用于把 v1 单用户数据库迁移到首个 owner；v2 日常运行不读取它们 |
 | `SCHEDULER_ENABLED` | `true` | 是否启动持久化事件调度器 |
 | `SCHEDULER_POLL_MS` | `30000` | 扫描到期事件的间隔，单位毫秒 |
 | `SCHEDULER_LEASE_MS` | `600000` | 单次调度任务的数据库租约时长，单位毫秒 |
@@ -63,7 +63,7 @@ npm run start
 | `SMTP_FROM` | 空 | 发件人地址 |
 | `NOTIFICATION_EMAIL` | 空 | 默认收件人地址 |
 | `AI_PROVIDER` | `none` | 当前仅支持 `none`/`disabled` 和离线 `mock`；其他值尚未接入真实 provider |
-| `AI_API_TOKEN` | 空 | AI 原子写接口的 Bearer token；生产环境必须配置 |
+| `AI_API_TOKEN` | 空 | 仅用于迁移 v1 全局 AI token；v2 使用账户内创建的 scoped API token |
 | `OPENAI_API_KEY` | 空 | 为未来 OpenAI provider 预留；当前不会发起 OpenAI API 请求 |
 | `OPENAI_BASE_URL` | OpenAI API | 为未来 OpenAI 兼容 provider 预留的服务地址 |
 | `OPENAI_MODEL` | 空 | 为未来 OpenAI provider 预留的模型标识 |
@@ -78,16 +78,22 @@ npm run start
 
 ## 访问认证
 
-本地开发服务只监听回环地址，不要求登录。生产模式下，页面、静态资源和普通业务 API 统一使用 HTTP Basic 单用户认证；`/api/health` 仅公开最小健康状态。未配置 `APP_AUTH_USERNAME` 或 `APP_AUTH_PASSWORD` 时，业务请求和 readiness 检查都会失败关闭。
+页面使用应用内注册和登录，不再触发浏览器 HTTP Basic 权限框。密码以 `scrypt` 加盐散列保存；随机 Session token 仅通过 `HttpOnly; SameSite=Lax` Cookie 传输，数据库只保存 token 哈希。生产 HTTPS 下 Cookie 同时设置 `Secure`。所有会话写请求必须通过精确 Origin 和 CSRF 双重校验。
 
-AI 路由不接受页面 Basic 凭据，独立使用 `AI_API_TOKEN` Bearer token；反过来，AI token 也不能访问普通资产、设置或 SMTP 测试接口。部署时必须启用 HTTPS，并为应用密码和 AI token 使用不同的强随机值。
+每个资产、流水、价格、预期资产、事件、运行记录、邮件 outbox、设置和 AI 审计行都绑定不可变的 `owner_id`。仓储查询不会接受客户端提交的 owner，跨账户资源访问统一返回 `404`。调度器、邮件与 AI 命令同样按 owner 执行。
+
+`REGISTRATION_MODE=open` 时登录页可创建账户；完成初始账户创建后，可改为 `closed` 并重启容器。静态登录页面、`/api/health` 和认证接口公开，普通业务 API 必须使用 Session。AI 路由只接受账户级 Bearer token，不接受页面 Session；Bearer token 也不能访问普通业务 API。
+
+升级 v1 数据库时，首次启动需暂时保留原 `APP_AUTH_USERNAME`、`APP_AUTH_PASSWORD` 和可选 `AI_API_TOKEN`。迁移会把所有旧数据和旧 AI token 归属该 owner；成功登录并确认数据后即可从环境文件删除这些旧变量。
 
 ## AI 原子命令 API
 
-`GET /api/ai/capabilities` 返回白名单命令、确认要求、版本键格式和完整 JSON Schema。读取能力和写入 `POST /api/ai/commands/execute` 在生产环境都必须携带：
+登录账户后可通过 `POST /api/account/api-tokens` 创建只显示一次的 token，并为其分配 `ai:read`、`finance:write` 等 scope。`GET /api/account/api-tokens` 列出当前账户的 token 元数据，`DELETE /api/account/api-tokens/:id` 吊销 token；这些账户接口使用页面 Session、Origin 和 CSRF 保护。
+
+`GET /api/ai/capabilities` 返回白名单命令、确认要求、版本键格式和完整 JSON Schema。读取能力和写入 `POST /api/ai/commands/execute` 必须携带所属账户的 token：
 
 ```http
-Authorization: Bearer <AI_API_TOKEN>
+Authorization: Bearer <ACCOUNT_API_TOKEN>
 Content-Type: application/json
 ```
 
@@ -115,7 +121,7 @@ Content-Type: application/json
 
 接口具有以下边界：
 
-- `idempotencyKey` 全局唯一并绑定规范化后的完整请求；同键同请求会重放结果，同键不同请求返回冲突。
+- `idempotencyKey` 在账户内唯一并绑定规范化后的完整请求；同键同请求会重放结果，同键不同请求返回冲突。
 - 所有更新命令必须在 `expectedVersions` 提供带类型前缀的版本，例如 `asset:<id>`；缺失或冲突时整批回滚。
 - 所有金额和数量必须是十进制字符串。
 - 流水、非零期初持仓、预期资产阶段变更，以及可启动联网任务或邮件的事件变更必须设置 `confirmed: true`。
@@ -133,7 +139,7 @@ Content-Type: application/json
 
 ```powershell
 Copy-Item .env.example .env
-# 修改 .env；至少设置 APP_AUTH_USERNAME、APP_AUTH_PASSWORD 和 APP_BASE_URL
+# 修改 .env；至少确认 APP_BASE_URL 和 REGISTRATION_MODE
 docker compose up -d --build
 docker compose ps
 docker compose logs -f finance-dashboard
@@ -173,7 +179,7 @@ VPS 安装 Docker Engine 和 Compose 插件后，将 `compose.vps.yml` 与环境
 ```bash
 cp .env.vps.example .env
 chmod 600 .env
-# 编辑 .env：填写 DOCKER_IMAGE、固定 IMAGE_TAG、公开 URL、认证和可选 SMTP/AI 配置
+# 编辑 .env：填写 DOCKER_IMAGE、固定 IMAGE_TAG、公开 URL、注册模式和可选 SMTP/AI 配置
 docker compose --env-file .env -f compose.vps.yml pull
 docker compose --env-file .env -f compose.vps.yml up -d
 docker compose --env-file .env -f compose.vps.yml ps
@@ -239,7 +245,7 @@ docker compose exec finance-dashboard node --input-type=module -e "import Databa
 docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-backup.sqlite
 ```
 
-将快照复制到加密的异地存储，并配置保留周期。恢复前应停止应用、保留当前数据库、将快照放回 `/app/data/finance.sqlite`、确认文件属主可由容器中的 `node` 用户读写，然后启动并检查 `/api/health`、资产总数、最近价格和事件执行记录。备份只有经过定期恢复演练才可信。
+将快照复制到加密的异地存储，并配置保留周期。恢复前应停止所有使用该卷的容器，保留当前数据库，然后清理 `/app/data/finance.sqlite`、`/app/data/finance.sqlite-wal` 和 `/app/data/finance.sqlite-shm` 三个文件，再把快照放回 `/app/data/finance.sqlite`，确认文件属主可由容器中的 `node` 用户读写。v1/v2 回滚必须同时切回对应镜像和数据库快照；旧镜像不能直接运行迁移后的 v2 数据库。启动后检查 `/api/health`、schema 版本、外键完整性、资产总数、最近价格和事件执行记录。备份只有经过定期恢复演练才可信。
 
 本地源码部署的升级流程是：创建在线备份、拉取新代码、`docker compose build`、`docker compose up -d`、检查健康状态和日志。VPS 镜像部署则在备份后修改 `.env` 中的固定 `IMAGE_TAG`，执行 `docker compose --env-file .env -f compose.vps.yml pull` 和 `docker compose --env-file .env -f compose.vps.yml up -d`。涉及 schema 迁移时先在备份副本上验证。
 

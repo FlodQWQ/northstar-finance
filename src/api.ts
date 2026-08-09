@@ -11,27 +11,80 @@ import { withAppBasePath } from "./basePath";
 
 export class ApiError extends Error {
   status: number;
+  code: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
-type RequestOptions = Omit<RequestInit, "body"> & { body?: unknown };
-type ErrorPayload = { message?: string; error?: { message?: string } };
+export interface AuthUser {
+  id: string;
+  username: string;
+  email: string | null;
+  role: "owner" | "user";
+}
+
+export interface AuthSessionData {
+  authenticated: true;
+  user: AuthUser;
+  csrfToken: string;
+}
+
+export interface SignedOutSessionData {
+  authenticated: false;
+}
+
+export interface LoginInput {
+  identifier: string;
+  password: string;
+}
+
+export interface RegisterInput {
+  username: string;
+  email?: string;
+  password: string;
+}
+
+type RequestOptions = Omit<RequestInit, "body"> & {
+  body?: unknown;
+  handleUnauthorized?: boolean;
+};
+type ErrorPayload = { message?: string; error?: { code?: string; message?: string } };
+
+let activeCsrfToken = "";
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setApiAuthSession(session: AuthSessionData | null): void {
+  activeCsrfToken = session?.csrfToken ?? "";
+}
+
+export function setApiUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const {
+    body,
+    handleUnauthorized = true,
+    ...requestOptions
+  } = options;
   const headers = new Headers(options.headers);
-  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+  const method = (requestOptions.method ?? "GET").toUpperCase();
+  const isMutation = !["GET", "HEAD", "OPTIONS"].includes(method);
+  if (body !== undefined) headers.set("Content-Type", "application/json");
+  if (isMutation && activeCsrfToken) headers.set("X-CSRF-Token", activeCsrfToken);
 
   let response: Response;
   try {
     response = await fetch(withAppBasePath(path), {
-      ...options,
+      ...requestOptions,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      credentials: requestOptions.credentials ?? "same-origin",
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
     throw new ApiError("无法连接服务，请检查 API 是否已启动", 0);
@@ -46,7 +99,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!response.ok) {
     const nestedMessage = payload && "error" in payload ? payload.error?.message : undefined;
-    throw new ApiError(payload?.message || nestedMessage || `请求失败（${response.status}）`, response.status);
+    const errorCode = payload && "error" in payload ? payload.error?.code : undefined;
+    if (response.status === 401 && handleUnauthorized) {
+      activeCsrfToken = "";
+      unauthorizedHandler?.();
+    }
+    throw new ApiError(
+      payload?.message || nestedMessage || `请求失败（${response.status}）`,
+      response.status,
+      errorCode,
+    );
   }
   if (!payload || !("data" in payload)) {
     throw new ApiError("服务返回了无法识别的数据", response.status);
@@ -114,6 +176,24 @@ export type EventInput = Omit<
 >;
 
 export const api = {
+  auth: {
+    session: () => request<AuthSessionData | SignedOutSessionData>("/api/auth/session", {
+      handleUnauthorized: false,
+    }),
+    login: (input: LoginInput) =>
+      request<AuthSessionData>("/api/auth/login", {
+        method: "POST",
+        body: input,
+        handleUnauthorized: false,
+      }),
+    register: (input: RegisterInput) =>
+      request<AuthSessionData>("/api/auth/register", {
+        method: "POST",
+        body: input,
+        handleUnauthorized: false,
+      }),
+    logout: () => request<{ loggedOut: true }>("/api/auth/logout", { method: "POST" }),
+  },
   dashboard: () => request<DashboardData>("/api/dashboard"),
   assets: {
     list: () => request<Asset[]>("/api/assets"),
