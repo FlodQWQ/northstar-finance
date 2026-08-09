@@ -6,6 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
+      args:
+        VITE_BASE_PATH: "${VITE_BASE_PATH:-/}"
     image: northstar-finance:local
     restart: unless-stopped
     stop_grace_period: 20s

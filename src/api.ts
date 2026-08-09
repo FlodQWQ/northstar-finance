@@ -7,6 +7,7 @@ import type {
   MonitorRun,
   TrackedEvent,
 } from "../shared/types";
+import { withAppBasePath } from "./basePath";
 
 export class ApiError extends Error {
   status: number;
@@ -27,7 +28,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   let response: Response;
   try {
-    response = await fetch(path, {
+    response = await fetch(withAppBasePath(path), {
       ...options,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),

@@ -14,6 +14,9 @@ RUN npm ci
 
 FROM dependencies AS build
 
+ARG VITE_BASE_PATH=/
+ENV VITE_BASE_PATH=$VITE_BASE_PATH
+
 COPY . .
 RUN npm run build \
     && npm prune --omit=dev

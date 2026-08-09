@@ -45,11 +45,12 @@ npm run start
 | `PORT` | `5888` | 生产 HTTP 端口；Docker 内固定为 `5888` |
 | `API_PORT` | `5889` | 仅开发模式的 API 端口 |
 | `HOST` | `127.0.0.1` | 本地监听地址；容器内使用 `0.0.0.0` |
+| `VITE_BASE_PATH` | `/` | 前端构建时的公开路径；子路径部署可设为 `/northstar/` |
 | `HOST_PORT` | `5888` | 仅 Compose 使用的宿主机映射端口，不改变容器内端口 |
 | `TZ` | `Asia/Shanghai` | 调度与日志展示时区；持久化时间仍应使用 UTC |
 | `DATABASE_PATH` | `./data/finance.sqlite` | SQLite 文件路径；容器内为 `/app/data/finance.sqlite` |
 | `SEED_DEMO_DATA` | 开发为 `true`，生产为 `false` | 是否在空数据库中写入演示资产与事件 |
-| `APP_BASE_URL` | `http://127.0.0.1:5888` | 邮件链接与未来 OAuth 回调使用的公开地址 |
+| `APP_BASE_URL` | `http://127.0.0.1:5888` | AI capabilities、未来邮件链接及 OAuth 回调使用的公开地址 |
 | `APP_AUTH_USERNAME` | 空 | 生产页面与普通业务 API 的单用户 HTTP Basic 用户名；生产环境必填 |
 | `APP_AUTH_PASSWORD` | 空 | 强随机密码；生产环境必填且只能通过 HTTPS 使用 |
 | `SCHEDULER_ENABLED` | `true` | 是否启动持久化事件调度器 |
@@ -147,13 +148,16 @@ docker compose logs -f finance-dashboard
 ```powershell
 $DockerHubUser = "your-dockerhub-username"
 $Version = "0.1.0"
+$ViteBasePath = "/" # 子路径部署时改成 "/northstar/"
 docker login --username $DockerHubUser
-docker build --pull --target runtime -t "${DockerHubUser}/northstar-finance:${Version}" -t "${DockerHubUser}/northstar-finance:latest" .
+docker build --pull --target runtime --build-arg "VITE_BASE_PATH=$ViteBasePath" -t "${DockerHubUser}/northstar-finance:${Version}" -t "${DockerHubUser}/northstar-finance:latest" .
 docker push "${DockerHubUser}/northstar-finance:${Version}"
 docker push "${DockerHubUser}/northstar-finance:latest"
 ```
 
 仓库中的 `.github/workflows/docker-publish.yml` 可自动发布 `linux/amd64` 和 `linux/arm64`。在 GitHub 仓库的 Actions secrets 中配置 `DOCKERHUB_USERNAME` 和只具备该仓库读写权限的 `DOCKERHUB_TOKEN`：推送 `main` 会生成 `latest`、`main` 和 `sha-*` 标签，推送 `v0.1.0` 之类的 Git tag 会生成语义化版本标签。
+
+若镜像固定部署在子路径，在 GitHub Actions variables 中设置 `VITE_BASE_PATH`，例如 `/northstar/`。这是前端构建参数，容器启动后再修改不会改变已生成的资源路径。
 
 ```powershell
 git tag v0.1.0
@@ -181,6 +185,22 @@ VPS Compose 只从 Docker Hub 拉取镜像，不在服务器上构建。端口�
 ```caddyfile
 finance.example.com {
     reverse_proxy 127.0.0.1:5888
+}
+```
+
+部署在 `/northstar/` 之类的子路径时，镜像必须用相同的 `VITE_BASE_PATH` 构建，反向代理还必须剥离该前缀后再转发。Nginx 的 `proxy_pass` 上游地址末尾斜杠不能省略：
+
+```nginx
+location = /northstar {
+    return 308 /northstar/;
+}
+
+location ^~ /northstar/ {
+    proxy_pass http://127.0.0.1:5888/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Prefix /northstar;
 }
 ```
 

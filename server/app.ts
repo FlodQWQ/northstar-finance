@@ -50,6 +50,7 @@ export interface CreateAppOptions {
   serveStatic?: boolean;
   staticPath?: string;
   schedulerPollMs?: number;
+  appBaseUrl?: string | null;
   aiApiToken?: string | null;
   appAuthUsername?: string | null;
   appAuthPassword?: string | null;
@@ -107,8 +108,23 @@ function chooseAIProvider(providerId?: string): AIProvider {
   return new DisabledAIProvider();
 }
 
+function resolvePublicAICommandEndpoint(appBaseUrl: string): string {
+  if (!appBaseUrl) return "/api/ai/commands/execute";
+
+  const baseUrl = new URL(appBaseUrl);
+  if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+    throw new Error("APP_BASE_URL must use http or https");
+  }
+  baseUrl.search = "";
+  baseUrl.hash = "";
+  if (!baseUrl.pathname.endsWith("/")) baseUrl.pathname += "/";
+  return new URL("api/ai/commands/execute", baseUrl).toString();
+}
+
 export function createApp(options: CreateAppOptions = {}): FinanceApp {
   const production = process.env.NODE_ENV === "production";
+  const appBaseUrl = options.appBaseUrl ?? process.env.APP_BASE_URL?.trim() ?? "";
+  const publicAICommandEndpoint = resolvePublicAICommandEndpoint(appBaseUrl);
   const ownsDatabase = options.db === undefined;
   const db = options.db ?? openDatabase({ path: options.databasePath, seed: options.seed });
   const repository = new FinanceRepository(db);
@@ -481,7 +497,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
 
   app.get("/api/ai/capabilities", (_request, response) => {
     response.json(data({
-      ...getAICommandCapabilities(),
+      ...getAICommandCapabilities(publicAICommandEndpoint),
       authentication: aiApiToken ? "bearer" : "local-development-only",
     }));
   });

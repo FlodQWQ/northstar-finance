@@ -288,6 +288,24 @@ describe("AI atomic command API", () => {
       },
     });
   });
+
+  it("publishes the public command endpoint below the configured application path", async () => {
+    const prefixedApp = createApp({
+      databasePath: ":memory:",
+      seed: false,
+      serveStatic: false,
+      appBaseUrl: "https://la.134271.xyz/northstar",
+    });
+
+    try {
+      const response = await request(prefixedApp).get("/api/ai/capabilities").expect(200);
+      expect(response.body.data.endpoint).toBe(
+        "https://la.134271.xyz/northstar/api/ai/commands/execute",
+      );
+    } finally {
+      prefixedApp.finance.close();
+    }
+  });
 });
 
 describe("dashboard currency boundary", () => {

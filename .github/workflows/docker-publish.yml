@@ -75,6 +75,8 @@ jobs:
           file: ./Dockerfile
           target: runtime
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VITE_BASE_PATH=${{ vars.VITE_BASE_PATH || '/' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

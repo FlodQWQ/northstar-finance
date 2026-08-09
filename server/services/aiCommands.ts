@@ -180,9 +180,9 @@ function requiresConfirmation(command: z.infer<typeof aiCommandSchema>): boolean
   return false;
 }
 
-export function getAICommandCapabilities() {
+export function getAICommandCapabilities(endpoint = "/api/ai/commands/execute") {
   return {
-    endpoint: "/api/ai/commands/execute",
+    endpoint,
     atomic: true,
     idempotent: true,
     proposalBatchesAreAtomic: true,
