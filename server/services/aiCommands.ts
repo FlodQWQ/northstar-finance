@@ -101,6 +101,20 @@ export const aiCommandBatchSchema = z
 
 export type AICommandBatchInput = z.infer<typeof aiCommandBatchSchema>;
 
+export const AI_COMMAND_SCOPES = {
+  "asset.create": "assets:write",
+  "asset.price.update": "prices:write",
+  "asset.operation.record": "operations:write",
+  "expected.create": "expected:write",
+  "expected.update": "expected:write",
+  "event.create": "events:write",
+  "event.update": "events:write",
+} as const satisfies Record<z.infer<typeof aiCommandSchema>["type"], string>;
+
+export function getAICommandRequiredScopes(input: AICommandBatchInput): string[] {
+  return [...new Set(input.commands.map((command) => AI_COMMAND_SCOPES[command.type]))].sort();
+}
+
 export interface AICommandResult {
   index: number;
   commandId: string;
@@ -189,49 +203,50 @@ export function getAICommandCapabilities(endpoint = "/api/ai/commands/execute") 
     maxCommandsPerBatch: 50,
     expectedVersionKeys: ["asset:<id>", "expected:<id>", "event:<id>"],
     expectedVersionsRequiredForUpdates: true,
-    scopesEnforced: false,
+    scopesEnforced: true,
+    requiredBaseScope: "finance:write",
     actorIsCallerSupplied: true,
     requestJsonSchema: z.toJSONSchema(aiCommandBatchSchema),
     commands: [
       {
         type: "asset.create",
-        scope: "assets:write",
+        scope: AI_COMMAND_SCOPES["asset.create"],
         confirmation: "Required when quantity is non-zero",
         payload: "Asset create fields from shared Asset, with decimal values encoded as strings",
       },
       {
         type: "asset.price.update",
-        scope: "prices:write",
+        scope: AI_COMMAND_SCOPES["asset.price.update"],
         confirmation: "Not required",
         payload: "{ assetId, price, currency?, source?, asOf? }",
       },
       {
         type: "asset.operation.record",
-        scope: "operations:write",
+        scope: AI_COMMAND_SCOPES["asset.operation.record"],
         confirmation: "Always required; otherwise returned as a proposal",
         payload: "{ assetId, type, quantity?|quantityDelta?, unitPrice?, fee?, currency?, note?, occurredAt? }",
       },
       {
         type: "expected.create",
-        scope: "expected:write",
+        scope: AI_COMMAND_SCOPES["expected.create"],
         confirmation: "Not required",
         payload: "Expected asset create fields",
       },
       {
         type: "expected.update",
-        scope: "expected:write",
+        scope: AI_COMMAND_SCOPES["expected.update"],
         confirmation: "Required when changing lifecycle stage",
         payload: "{ id, changes }",
       },
       {
         type: "event.create",
-        scope: "events:write",
+        scope: AI_COMMAND_SCOPES["event.create"],
         confirmation: "Required when the event is active or email is enabled",
         payload: "Tracked event create fields",
       },
       {
         type: "event.update",
-        scope: "events:write",
+        scope: AI_COMMAND_SCOPES["event.update"],
         confirmation: "Required for changes that can trigger external research or email",
         payload: "{ id, changes }",
       },

@@ -24,7 +24,12 @@ import {
   ManualPriceProvider,
   type PriceProvider,
 } from "./providers/price";
-import { AICommandService, getAICommandCapabilities } from "./services/aiCommands";
+import {
+  aiCommandBatchSchema,
+  AICommandService,
+  getAICommandCapabilities,
+  getAICommandRequiredScopes,
+} from "./services/aiCommands";
 import {
   AuthError,
   AuthService,
@@ -358,8 +363,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
       next();
       return;
     }
-    const requiredScopes = request.method === "GET" ? ["ai:read"] : ["finance:write"];
-    const principal = authService.authenticateApiToken(bearerToken(request), requiredScopes);
+    const principal = authService.authenticateApiToken(bearerToken(request));
     if (!principal) {
       response.status(401).json({
         error: { code: "UNAUTHORIZED", message: "A valid user API bearer token is required" },
@@ -371,6 +375,8 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   });
 
   app.get("/api/ai/capabilities", (_request, response) => {
+    const principal = services(response).apiPrincipal;
+    if (principal) authService.requireApiTokenScopes(principal, ["ai:read"]);
     response.json(data({
       ...getAICommandCapabilities(publicAICommandEndpoint),
       authentication: "bearer-user-token",
@@ -378,7 +384,15 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   });
 
   app.post("/api/ai/commands/execute", (request, response) => {
-    const result = services(response).commandService.execute(request.body);
+    const requestServices = services(response);
+    const input = parse(aiCommandBatchSchema, request.body);
+    if (requestServices.apiPrincipal) {
+      authService.requireApiTokenScopes(requestServices.apiPrincipal, [
+        "finance:write",
+        ...getAICommandRequiredScopes(input),
+      ]);
+    }
+    const result = requestServices.commandService.execute(input);
     const status = result.status === "failed" ? 409 : result.replayed ? 200 : 201;
     response.status(status).json(data(result));
   });
@@ -686,11 +700,31 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
 
   app.patch("/api/settings", (request, response) => {
     const input = parse(settingsPatchSchema, request.body);
+    const authenticated = services(response).session;
+    const ownerOnlyKeys = ["proxyUrl", "aiProvider", "aiBaseUrl", "aiModel"] as const;
+    if (
+      authenticated &&
+      authenticated.user.role !== "owner" &&
+      ownerOnlyKeys.some((key) => input[key] !== undefined)
+    ) {
+      throw new AuthError(
+        "Only the application owner can change connection settings",
+        403,
+        "OWNER_REQUIRED",
+      );
+    }
     response.json(data(services(response).repository.updateSettings(input), "Settings saved"));
   });
 
   const testConnection = async (kind: string, response: Response) => {
     const requestServices = services(response);
+    if (requestServices.session && requestServices.session.user.role !== "owner") {
+      throw new AuthError(
+        "Only the application owner can test server connections",
+        403,
+        "OWNER_REQUIRED",
+      );
+    }
     if (kind === "ai") return aiProviderFor(requestServices.repository).testConnection();
     if (kind === "price") return priceProvider.testConnection();
     if (kind === "email" || kind === "smtp") return requestServices.emailOutbox.testConnection();

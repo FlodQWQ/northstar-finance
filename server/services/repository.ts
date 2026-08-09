@@ -729,8 +729,6 @@ export class FinanceRepository {
     const values = Object.fromEntries(rows.map((row) => [row.key, row.value]));
     const configuredAiProvider = values.aiProvider ?? "none";
     const aiProvider = configuredAiProvider === "none" ? "disabled" : configuredAiProvider;
-    const smtpHost = values.smtpHost ?? "";
-    const smtpFrom = values.smtpFrom ?? "";
     const notificationEmail = values.notificationEmail ?? "";
     return {
       baseCurrency: values.baseCurrency ?? "USD",
@@ -741,12 +739,14 @@ export class FinanceRepository {
       aiBaseUrl: values.aiBaseUrl ?? "",
       aiModel: values.aiModel ?? "",
       aiConfigured: aiProvider === "mock",
-      smtpHost,
+      smtpHost: values.smtpHost ?? "",
       smtpPort: Number(values.smtpPort ?? 587),
       smtpSecure: values.smtpSecure === "true",
-      smtpFrom,
+      smtpFrom: values.smtpFrom ?? "",
       notificationEmail,
-      smtpConfigured: Boolean(smtpHost && smtpFrom && notificationEmail),
+      smtpConfigured: Boolean(
+        process.env.SMTP_HOST?.trim() && process.env.SMTP_FROM?.trim(),
+      ),
     };
   }
 

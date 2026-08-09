@@ -908,6 +908,19 @@ export class AuthService {
     return { token: apiToken, user: this.getUser(row.user_id) };
   }
 
+  public requireApiTokenScopes(
+    principal: ApiTokenPrincipal,
+    requiredScopes: readonly string[],
+  ): void {
+    if (!requiredScopes.every((scope) => principal.token.scopes.includes(scope))) {
+      throw new AuthError(
+        "API token does not have the required scope",
+        403,
+        "INSUFFICIENT_TOKEN_SCOPE",
+      );
+    }
+  }
+
   public listApiTokens(userId: string): ApiToken[] {
     this.getUser(userId);
     return (this.db.prepare(`

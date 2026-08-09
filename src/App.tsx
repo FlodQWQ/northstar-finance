@@ -51,7 +51,7 @@ function AuthenticatedRoutes({
         <Route path="holdings" element={<SuspendedPage><HoldingsPage /></SuspendedPage>} />
         <Route path="expected" element={<SuspendedPage><ExpectedPage /></SuspendedPage>} />
         <Route path="events" element={<SuspendedPage><EventsPage /></SuspendedPage>} />
-        <Route path="settings" element={<SuspendedPage><SettingsPage /></SuspendedPage>} />
+        <Route path="settings" element={<SuspendedPage><SettingsPage user={session.user} /></SuspendedPage>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

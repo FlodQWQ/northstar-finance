@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { AppSettings } from "../../shared/types";
-import { api } from "../api";
+import { api, type AuthUser } from "../api";
 import { useResource } from "../hooks";
 import {
   Button,
@@ -25,7 +25,7 @@ import {
   useToast,
 } from "../components/ui";
 
-export default function SettingsPage() {
+export default function SettingsPage({ user }: { user: AuthUser }) {
   const { data, loading, error, reload, setData } = useResource(api.settings.get);
   const [form, setForm] = useState<AppSettings | null>(null);
   const [saving, setSaving] = useState(false);
@@ -42,7 +42,20 @@ export default function SettingsPage() {
     if (!form) return;
     setSaving(true);
     try {
-      const payload: Partial<AppSettings> & Record<string, unknown> = { ...form };
+      const payload: Partial<AppSettings> & Record<string, unknown> = {
+        baseCurrency: form.baseCurrency,
+        timezone: form.timezone,
+        locale: form.locale,
+        notificationEmail: form.notificationEmail,
+        ...(user.role === "owner"
+          ? {
+              proxyUrl: form.proxyUrl,
+              aiProvider: form.aiProvider,
+              aiBaseUrl: form.aiBaseUrl,
+              aiModel: form.aiModel,
+            }
+          : {}),
+      };
       const saved = await api.settings.update(payload);
       setData(saved);
       setForm(saved);
@@ -85,10 +98,10 @@ export default function SettingsPage() {
 
       {form ? (
         <form id="settings-form" className="settings-layout" onSubmit={save}>
-          <nav className="settings-nav" aria-label="设置分区">
+          <nav className={`settings-nav${user.role === "owner" ? "" : " compact"}`} aria-label="设置分区">
             <a href="#general"><Settings2 size={16} /> 常规</a>
-            <a href="#network"><Globe2 size={16} /> 网络与价格</a>
-            <a href="#ai"><Bot size={16} /> AI</a>
+            {user.role === "owner" ? <a href="#network"><Globe2 size={16} /> 网络与价格</a> : null}
+            {user.role === "owner" ? <a href="#ai"><Bot size={16} /> AI</a> : null}
             <a href="#email"><Mail size={16} /> 邮件</a>
             <a href="#security"><ShieldCheck size={16} /> 数据安全</a>
           </nav>
@@ -115,7 +128,7 @@ export default function SettingsPage() {
               </div>
             </section>
 
-            <section className="surface settings-section" id="network">
+            {user.role === "owner" ? <section className="surface settings-section" id="network">
               <div className="settings-section-heading"><span><Globe2 size={19} /></span><div><h2>网络与价格数据</h2><p>所有联网查询均由服务端发起。</p></div></div>
               <FormField label="HTTP 代理" hint="留空表示直接联网；本地代理可使用 http://127.0.0.1:7890">
                 <input type="url" value={form.proxyUrl} onChange={(event) => setForm({ ...form, proxyUrl: event.target.value })} placeholder="http://127.0.0.1:7890" />
@@ -124,9 +137,9 @@ export default function SettingsPage() {
                 <div><span className="connection-icon"><Database size={18} /></span><span><strong>价格数据源</strong><small>用于持仓页面的按需价格更新</small></span></div>
                 <Button className="secondary" type="button" onClick={() => void testConnection("price")} disabled={testing !== null}>{testing === "price" ? <LoaderCircle className="spin" size={16} /> : <Wifi size={16} />} 测试连接</Button>
               </div>
-            </section>
+            </section> : null}
 
-            <section className="surface settings-section" id="ai">
+            {user.role === "owner" ? <section className="surface settings-section" id="ai">
               <div className="settings-section-heading"><span><Bot size={19} /></span><div><h2>AI 服务</h2><p>连接配置在服务重启后生效，不直接修改真实余额。</p></div><StatusBadge label={form.aiConfigured ? "已配置" : "未配置"} tone={form.aiConfigured ? "positive" : "warning"} /></div>
               <div className="form-grid two-column">
                 <FormField label="提供方">
@@ -142,26 +155,14 @@ export default function SettingsPage() {
                 <input type="url" value={form.aiBaseUrl} onChange={(event) => setForm({ ...form, aiBaseUrl: event.target.value })} placeholder="https://api.openai.com/v1" />
               </FormField>
               <div className="section-actions"><Button className="secondary" type="button" onClick={() => void testConnection("ai")} disabled={testing !== null}>{testing === "ai" ? <LoaderCircle className="spin" size={16} /> : <Bot size={16} />} 测试 AI</Button></div>
-            </section>
+            </section> : null}
 
             <section className="surface settings-section" id="email">
-              <div className="settings-section-heading"><span><Mail size={19} /></span><div><h2>邮件通知</h2><p>事件运行完成后由 SMTP 服务发送结果。</p></div><StatusBadge label={form.smtpConfigured ? "已配置" : "未配置"} tone={form.smtpConfigured ? "positive" : "warning"} /></div>
-              <div className="form-grid two-column">
-                <FormField label="SMTP 主机">
-                  <input value={form.smtpHost} onChange={(event) => setForm({ ...form, smtpHost: event.target.value })} placeholder="smtp.example.com" />
-                </FormField>
-                <FormField label="端口">
-                  <input type="number" inputMode="numeric" min="1" max="65535" value={form.smtpPort} onChange={(event) => setForm({ ...form, smtpPort: Number(event.target.value) || 587 })} />
-                </FormField>
-                <FormField label="发件人">
-                  <input type="email" value={form.smtpFrom} onChange={(event) => setForm({ ...form, smtpFrom: event.target.value })} placeholder="Northstar <notice@example.com>" />
-                </FormField>
-                <FormField label="默认收件邮箱">
-                  <input type="email" value={form.notificationEmail} onChange={(event) => setForm({ ...form, notificationEmail: event.target.value })} placeholder="you@example.com" />
-                </FormField>
-              </div>
-              <label className="toggle-row"><span><strong>使用安全连接</strong><small>通常 465 端口启用，587 端口按服务商要求设置</small></span><input type="checkbox" checked={form.smtpSecure} onChange={(event) => setForm({ ...form, smtpSecure: event.target.checked })} /></label>
-              <div className="section-actions"><Button className="secondary" type="button" onClick={() => void testConnection("email")} disabled={testing !== null}>{testing === "email" ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />} 测试 SMTP</Button></div>
+              <div className="settings-section-heading"><span><Mail size={19} /></span><div><h2>邮件通知</h2><p>SMTP 连接由服务器环境统一管理，账户只保存自己的默认收件地址。</p></div><StatusBadge label={form.smtpConfigured ? "服务可用" : "服务未配置"} tone={form.smtpConfigured ? "positive" : "warning"} /></div>
+              <FormField label="默认收件邮箱">
+                <input type="email" value={form.notificationEmail} onChange={(event) => setForm({ ...form, notificationEmail: event.target.value })} placeholder="you@example.com" />
+              </FormField>
+              {user.role === "owner" ? <div className="section-actions"><Button className="secondary" type="button" onClick={() => void testConnection("email")} disabled={testing !== null}>{testing === "email" ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />} 测试 SMTP</Button></div> : null}
             </section>
 
             <section className="surface settings-section" id="security">

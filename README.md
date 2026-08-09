@@ -60,8 +60,7 @@ npm run start
 | `SMTP_PORT` | `587` | SMTP 端口，通常为 `587` 或 `465` |
 | `SMTP_SECURE` | `false` | 端口 `465` 通常设为 `true`；`587` 使用 STARTTLS |
 | `SMTP_USER` / `SMTP_PASS` | 空 | SMTP 凭据，生产环境建议使用应用专用密码 |
-| `SMTP_FROM` | 空 | 发件人地址 |
-| `NOTIFICATION_EMAIL` | 空 | 默认收件人地址 |
+| `SMTP_FROM` | 空 | 发件人地址；SMTP 连接参数只能由部署环境配置，不接受账户 API 修改 |
 | `AI_PROVIDER` | `none` | 当前仅支持 `none`/`disabled` 和离线 `mock`；其他值尚未接入真实 provider |
 | `AI_API_TOKEN` | 空 | 仅用于迁移 v1 全局 AI token；v2 使用账户内创建的 scoped API token |
 | `OPENAI_API_KEY` | 空 | 为未来 OpenAI provider 预留；当前不会发起 OpenAI API 请求 |
@@ -88,7 +87,7 @@ npm run start
 
 ## AI 原子命令 API
 
-登录账户后可通过 `POST /api/account/api-tokens` 创建只显示一次的 token，并为其分配 `ai:read`、`finance:write` 等 scope。`GET /api/account/api-tokens` 列出当前账户的 token 元数据，`DELETE /api/account/api-tokens/:id` 吊销 token；这些账户接口使用页面 Session、Origin 和 CSRF 保护。
+登录账户后可通过 `POST /api/account/api-tokens` 创建只显示一次的 token，并为其分配 scope。读取 capabilities 需要 `ai:read`；执行命令批次同时需要 `finance:write` 和批内每种命令对应的细粒度 scope，例如 `assets:write`、`prices:write`、`operations:write`、`expected:write` 或 `events:write`。`GET /api/account/api-tokens` 列出当前账户的 token 元数据，`DELETE /api/account/api-tokens/:id` 吊销 token；这些账户接口使用页面 Session、Origin 和 CSRF 保护。
 
 `GET /api/ai/capabilities` 返回白名单命令、确认要求、版本键格式和完整 JSON Schema。读取能力和写入 `POST /api/ai/commands/execute` 必须携带所属账户的 token：
 
@@ -251,7 +250,7 @@ docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-ba
 
 ## 调度、邮件和 provider 边界
 
-事件计划、下一次运行时间与执行记录必须持久化到 SQLite。进程重启后调度器应恢复到期任务，并通过数据库唯一约束避免同一计划时点被重复认领。SMTP 无法保证严格的 exactly-once；邮件应通过持久化 outbox、有限重试和可见的执行状态降低丢失与重复风险。
+事件计划、下一次运行时间与执行记录必须持久化到 SQLite。进程重启后调度器应恢复到期任务，并通过数据库唯一约束避免同一计划时点被重复认领。SMTP 主机、端口、发件人和凭据只从服务器环境读取，账户仅保存自己的默认收件地址，避免账户输入改变携带全局凭据的连接目标。SMTP 无法保证严格的 exactly-once；邮件应通过持久化 outbox、有限重试和可见的执行状态降低丢失与重复风险。
 
 ### 当前 AI 实现状态
 
@@ -281,5 +280,5 @@ docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-ba
 - 重启容器后资产、历史和计划仍存在，且没有重复执行同一到期任务。
 - SMTP 使用测试事件验证收件、失败状态和重试；发信域配置 SPF、DKIM、DMARC。
 - 从在线快照恢复到空环境，核对资产、价格历史、事件和执行记录。
-- 确认生产 Basic 认证和 AI Bearer token 互相隔离，强密码已轮换，并在反向代理启用 HTTPS、登录限速和安全日志策略。
+- 确认页面 Session 和 AI Bearer token 互相隔离，细粒度 scope 生效，并在反向代理启用 HTTPS、登录限速和安全日志策略。
 - 接入真实联网 provider 前完成目标域白名单、重定向/响应体限制、超时和 SSRF 测试。

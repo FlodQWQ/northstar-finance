@@ -14,6 +14,11 @@ interface OutboxRow {
   attempts: number;
 }
 
+function smtpPort(): number {
+  const parsed = Number(process.env.SMTP_PORT ?? 587);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65_535 ? parsed : 587;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -41,11 +46,16 @@ export class SmtpEmailOutbox implements EmailOutbox {
   ) {}
 
   private getTransportConfig() {
-    const settings = this.repository.getSettings();
-    const configured = Boolean(settings.smtpHost && settings.smtpFrom);
+    const host = process.env.SMTP_HOST?.trim() ?? "";
+    const from = process.env.SMTP_FROM?.trim() ?? "";
     return {
-      configured,
-      settings,
+      configured: Boolean(host && from),
+      transport: {
+        host,
+        port: smtpPort(),
+        secure: process.env.SMTP_SECURE?.trim().toLowerCase() === "true",
+      },
+      from,
       auth:
         process.env.SMTP_USER && process.env.SMTP_PASS
           ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
@@ -87,7 +97,7 @@ export class SmtpEmailOutbox implements EmailOutbox {
   }
 
   public async processDue(limit = 10): Promise<void> {
-    const { configured, settings, auth } = this.getTransportConfig();
+    const { configured, transport, from, auth } = this.getTransportConfig();
     if (!configured) {
       this.db.prepare(`
         UPDATE email_outbox
@@ -112,9 +122,7 @@ export class SmtpEmailOutbox implements EmailOutbox {
     if (rows.length === 0) return;
 
     const transporter = nodemailer.createTransport({
-      host: settings.smtpHost,
-      port: settings.smtpPort,
-      secure: settings.smtpSecure,
+      ...transport,
       auth,
       connectionTimeout: 10_000,
       greetingTimeout: 10_000,
@@ -124,7 +132,7 @@ export class SmtpEmailOutbox implements EmailOutbox {
     for (const row of rows) {
       try {
         const result = await transporter.sendMail({
-          from: settings.smtpFrom.replace(/[\r\n]/g, " "),
+          from: from.replace(/[\r\n]/g, " "),
           to: row.recipient,
           subject: row.subject,
           text: row.text_body,
@@ -170,15 +178,13 @@ export class SmtpEmailOutbox implements EmailOutbox {
   }
 
   public async testConnection(): Promise<ConnectionTestResult> {
-    const { configured, settings, auth } = this.getTransportConfig();
+    const { configured, transport, auth } = this.getTransportConfig();
     if (!configured) {
       return { ok: false, status: "skipped", message: "SMTP is not configured." };
     }
     try {
       const transporter = nodemailer.createTransport({
-        host: settings.smtpHost,
-        port: settings.smtpPort,
-        secure: settings.smtpSecure,
+        ...transport,
         auth,
         connectionTimeout: 10_000,
       });

@@ -255,7 +255,7 @@ describe("AI atomic command API", () => {
     });
     const apiToken = guarded.finance.authService.createApiToken(user.id, {
       name: "Test agent",
-      scopes: ["ai:read", "finance:write"],
+      scopes: ["ai:read", "finance:write", "expected:write"],
     });
     const payload = {
       idempotencyKey: "expected-create-1",

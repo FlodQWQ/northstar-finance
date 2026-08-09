@@ -211,10 +211,6 @@ export const settingsPatchSchema = z
     aiBaseUrl: safeUrl.optional(),
     aiModel: z.string().trim().max(160).optional(),
     aiConfigured: z.boolean().optional(),
-    smtpHost: z.string().trim().max(255).optional(),
-    smtpPort: z.number().int().min(1).max(65_535).optional(),
-    smtpSecure: z.boolean().optional(),
-    smtpFrom: z.string().trim().max(320).optional(),
     notificationEmail: z.string().trim().email().or(z.literal("")).optional(),
     smtpConfigured: z.boolean().optional(),
   })

@@ -430,6 +430,7 @@ td.numeric strong, td.numeric small { display: block; white-space: nowrap; }
   .recent-surface { grid-column: auto; }
   .settings-layout { grid-template-columns: 1fr; }
   .settings-nav { position: static; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; }
+  .settings-nav.compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .settings-nav a { min-width: 0; min-height: 52px; flex-direction: column; justify-content: center; gap: 3px; padding: 4px; background: var(--surface); border: 1px solid var(--border); font-size: 10px; text-align: center; }
   .desktop-table { display: none; }
   .mobile-data-list { display: grid; }

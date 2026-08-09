@@ -249,6 +249,15 @@ describe("tenant isolation", () => {
     await authenticated(app, alice, "patch", "/api/settings").send({ baseCurrency: "CNY" }).expect(200);
     expect((await authenticated(app, bob, "get", "/api/settings").expect(200)).body.data.baseCurrency)
       .toBe("USD");
+    await authenticated(app, bob, "patch", "/api/settings")
+      .send({ aiBaseUrl: "http://127.0.0.1:25" })
+      .expect(403);
+    await authenticated(app, bob, "patch", "/api/settings")
+      .send({ smtpHost: "attacker.invalid" })
+      .expect(400);
+    await authenticated(app, bob, "post", "/api/settings/test-email")
+      .send({})
+      .expect(403);
 
     const hiddenGets = [
       "/api/assets/alice-asset",
@@ -296,10 +305,14 @@ describe("tenant isolation", () => {
 
     const aliceToken = await authenticated(app, alice, "post", "/api/account/api-tokens").send({
       name: "Alice agent",
-      scopes: ["ai:read", "finance:write"],
+      scopes: ["ai:read", "finance:write", "expected:write"],
     }).expect(201);
     const bobToken = await authenticated(app, bob, "post", "/api/account/api-tokens").send({
       name: "Bob agent",
+      scopes: ["ai:read", "finance:write", "expected:write"],
+    }).expect(201);
+    const limitedToken = await authenticated(app, alice, "post", "/api/account/api-tokens").send({
+      name: "Limited agent",
       scopes: ["ai:read", "finance:write"],
     }).expect(201);
     const batch = (id: string) => ({
@@ -310,6 +323,21 @@ describe("tenant isolation", () => {
         payload: { id, name: id, currency: "USD" },
       }],
     });
+
+    const capabilities = await request(app).get("/api/ai/capabilities")
+      .set("Authorization", `Bearer ${limitedToken.body.data.token}`)
+      .expect(200);
+    expect(capabilities.body.data).toMatchObject({
+      scopesEnforced: true,
+      requiredBaseScope: "finance:write",
+    });
+    const denied = await request(app).post("/api/ai/commands/execute")
+      .set("Authorization", `Bearer ${limitedToken.body.data.token}`)
+      .send({ ...batch("denied-ai-expected"), idempotencyKey: "denied-scope-key" })
+      .expect(403);
+    expect(denied.body.error.code).toBe("INSUFFICIENT_TOKEN_SCOPE");
+    expect((await authenticated(app, alice, "get", "/api/expected").expect(200)).body.data)
+      .toEqual([]);
 
     await request(app).post("/api/ai/commands/execute")
       .set("Authorization", `Bearer ${aliceToken.body.data.token}`)

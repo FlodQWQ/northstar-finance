@@ -109,6 +109,28 @@ describe("openDatabase", () => {
     expect(db.prepare("SELECT COUNT(*) FROM assets").pluck().get()).toBe(0);
   });
 
+  it("does not copy deployment connection values into newly registered account defaults", () => {
+    vi.stubEnv("HTTPS_PROXY", "http://proxy-user:proxy-pass@proxy.internal:7890");
+    vi.stubEnv("OPENAI_BASE_URL", "https://private-ai.internal/v1");
+    vi.stubEnv("SMTP_HOST", "smtp.internal");
+    vi.stubEnv("SMTP_FROM", "private@example.com");
+    vi.stubEnv("NOTIFICATION_EMAIL", "operator@example.com");
+
+    const { db } = createFileDatabase(false);
+    const values = Object.fromEntries(
+      (db.prepare("SELECT key, value FROM settings").all() as Array<{ key: string; value: string }>)
+        .map((row) => [row.key, row.value]),
+    );
+
+    expect(values).toMatchObject({
+      proxyUrl: "",
+      aiBaseUrl: "",
+      smtpHost: "",
+      smtpFrom: "",
+      notificationEmail: "",
+    });
+  });
+
   it("keeps decimal input exact and enforces operation idempotency and cascades", () => {
     const { db } = createFileDatabase(false);
     insertAsset(db);
