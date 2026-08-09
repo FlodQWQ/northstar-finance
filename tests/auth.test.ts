@@ -217,9 +217,15 @@ describe("application authentication", () => {
     const limited = await request(app)
       .post("/api/auth/login")
       .set("Origin", origin)
-      .send({ identifier: "limited-owner", password })
+      .send({ identifier: "limited-owner", password: "incorrect password value" })
       .expect(429);
     expect(limited.body.error.code).toBe("RATE_LIMITED");
+
+    await request(app)
+      .post("/api/auth/login")
+      .set("Origin", origin)
+      .send({ identifier: "limited-owner", password })
+      .expect(200);
   });
 
   it("persists account login limits across client IPs and application restarts", async () => {
@@ -253,9 +259,16 @@ describe("application authentication", () => {
       .post("/api/auth/login")
       .set("Origin", origin)
       .set("X-Forwarded-For", "192.0.2.25")
-      .send({ identifier: "persistent-limit", password })
+      .send({ identifier: "persistent-limit", password: "incorrect password value" })
       .expect(429);
     expect(limited.body.error.code).toBe("RATE_LIMITED");
+
+    await request(restarted)
+      .post("/api/auth/login")
+      .set("Origin", origin)
+      .set("X-Forwarded-For", "192.0.2.25")
+      .send({ identifier: "persistent-limit", password })
+      .expect(200);
   });
 });
 

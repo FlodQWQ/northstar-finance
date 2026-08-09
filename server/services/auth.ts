@@ -598,6 +598,19 @@ export class AuthService {
     return mapUser(row);
   }
 
+  public resolveLoginUserId(identifierInput: unknown): string | null {
+    const identifier = typeof identifierInput === "string"
+      ? identifierInput.trim().normalize("NFKC").toLowerCase()
+      : "";
+    if (identifier.length === 0 || identifier.length > 254) return null;
+    const row = this.db.prepare(`
+      SELECT id FROM users
+      WHERE username_normalized = ? OR email_normalized = ?
+      LIMIT 1
+    `).get(identifier, identifier) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
   public async authenticateCredentials(identifierInput: unknown, passwordInput: unknown): Promise<AuthUser | null> {
     const password = validateLoginPassword(passwordInput);
     const identifier = typeof identifierInput === "string"

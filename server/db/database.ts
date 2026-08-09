@@ -50,6 +50,29 @@ const legacyIndexes = [
   "idx_email_outbox_due",
 ] as const;
 
+const BOOTSTRAP_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$/;
+
+function validateBootstrapUsername(value: string): string {
+  const username = value.trim().normalize("NFKC");
+  if (!BOOTSTRAP_USERNAME_PATTERN.test(username)) {
+    throw new Error(
+      "APP_AUTH_USERNAME must be 3-32 characters and contain only letters, numbers, dot, underscore, or hyphen",
+    );
+  }
+  return username;
+}
+
+function validateBootstrapPassword(password: string): string {
+  const characters = Array.from(password).length;
+  const bytes = Buffer.byteLength(password, "utf8");
+  if (characters < 12 || characters > 128 || bytes > 512 || !/\S/u.test(password)) {
+    throw new Error(
+      "APP_AUTH_PASSWORD must contain 12-128 characters and at least one non-space character",
+    );
+  }
+  return password;
+}
+
 function normalizeUsername(username: string): string {
   return username.trim().normalize("NFKC").toLowerCase();
 }
@@ -205,8 +228,8 @@ const schema = `
     revoked_at TEXT
   );
 
-  CREATE TABLE IF NOT EXISTS auth_login_limits (
-    identifier_hash TEXT PRIMARY KEY,
+  CREATE TABLE IF NOT EXISTS auth_account_limits (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     attempts INTEGER NOT NULL CHECK (attempts >= 0),
     reset_at INTEGER NOT NULL
   );
@@ -414,8 +437,8 @@ const schema = `
     ON sessions(user_id, revoked_at, idle_expires_at);
   CREATE INDEX IF NOT EXISTS idx_api_tokens_user
     ON api_tokens(user_id, revoked_at, expires_at);
-  CREATE INDEX IF NOT EXISTS idx_auth_login_limits_reset
-    ON auth_login_limits(reset_at);
+  CREATE INDEX IF NOT EXISTS idx_auth_account_limits_reset
+    ON auth_account_limits(reset_at);
   CREATE INDEX IF NOT EXISTS idx_assets_owner_name
     ON assets(owner_id, name COLLATE NOCASE);
   CREATE INDEX IF NOT EXISTS idx_asset_operations_asset_time
@@ -543,13 +566,15 @@ export function getBootstrapUserId(db: SqliteDatabase): string | null {
 }
 
 function createBootstrapUser(db: SqliteDatabase): BootstrapUserIdentity {
-  const username = process.env.APP_AUTH_USERNAME?.trim() ?? "";
-  const password = process.env.APP_AUTH_PASSWORD ?? "";
-  if (!username || !password) {
+  const rawUsername = process.env.APP_AUTH_USERNAME ?? "";
+  const rawPassword = process.env.APP_AUTH_PASSWORD ?? "";
+  if (!rawUsername.trim() || !rawPassword) {
     throw new Error(
-      "APP_AUTH_USERNAME and APP_AUTH_PASSWORD are required to migrate the legacy database",
+      "APP_AUTH_USERNAME and APP_AUTH_PASSWORD are required to bootstrap or migrate the database",
     );
   }
+  const username = validateBootstrapUsername(rawUsername);
+  const password = validateBootstrapPassword(rawPassword);
   if (normalizeUsername(username) === normalizeUsername(DEFAULT_OWNER_USERNAME)) {
     throw new Error("APP_AUTH_USERNAME conflicts with the reserved internal account");
   }
@@ -569,33 +594,38 @@ function createBootstrapUser(db: SqliteDatabase): BootstrapUserIdentity {
     now,
   );
 
-  const aiToken = process.env.AI_API_TOKEN?.trim() ?? "";
-  if (aiToken) {
-    db.prepare(`
-      INSERT INTO api_tokens (
-        id, user_id, name, token_hash, token_prefix, scopes_json,
-        created_at, last_used_at, expires_at, revoked_at
-      ) VALUES (?, ?, 'Migrated AI API token', ?, ?, ?, ?, NULL, NULL, NULL)
-    `).run(
-      randomUUID(),
-      BOOTSTRAP_USER_ID,
-      hashApiToken(aiToken),
-      aiToken.slice(0, 12),
-      JSON.stringify([
-        "ai:read",
-        "finance:read",
-        "finance:write",
-        "assets:write",
-        "prices:write",
-        "operations:write",
-        "expected:write",
-        "events:write",
-      ]),
-      now,
-    );
-  }
-
   return { id: BOOTSTRAP_USER_ID, username };
+}
+
+function importLegacyAiToken(db: SqliteDatabase, userId: string): void {
+  const aiToken = process.env.AI_API_TOKEN?.trim() ?? "";
+  if (!aiToken) return;
+  db.prepare(`
+    INSERT INTO api_tokens (
+      id, user_id, name, token_hash, token_prefix, scopes_json,
+      created_at, last_used_at, expires_at, revoked_at
+    ) VALUES (?, ?, 'Migrated AI API token', ?, ?, ?, ?, NULL, NULL, NULL)
+  `).run(
+    randomUUID(),
+    userId,
+    hashApiToken(aiToken),
+    aiToken.slice(0, 12),
+    JSON.stringify([
+      "ai:read",
+      "finance:read",
+      "finance:write",
+      "assets:write",
+      "prices:write",
+      "operations:write",
+      "expected:write",
+      "events:write",
+    ]),
+    new Date().toISOString(),
+  );
+}
+
+function hasNonInternalUser(db: SqliteDatabase): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM users WHERE id <> ? LIMIT 1").get(DEFAULT_OWNER_ID));
 }
 
 function tableExists(db: SqliteDatabase, table: string): boolean {
@@ -624,7 +654,11 @@ function installFreshSchema(db: SqliteDatabase): void {
     initializeUserSettings(db, DEFAULT_OWNER_ID);
     const bootstrapUsername = process.env.APP_AUTH_USERNAME?.trim() ?? "";
     const bootstrapPassword = process.env.APP_AUTH_PASSWORD ?? "";
-    if (!getBootstrapUser(db) && (bootstrapUsername || bootstrapPassword)) {
+    if (
+      !getBootstrapUser(db) &&
+      !hasNonInternalUser(db) &&
+      (bootstrapUsername || bootstrapPassword)
+    ) {
       const bootstrap = createBootstrapUser(db);
       initializeUserSettings(db, bootstrap.id);
     }
@@ -646,6 +680,7 @@ function migrateLegacySchema(db: SqliteDatabase): void {
     db.exec(schema);
     ensureDefaultOwner(db);
     const bootstrap = createBootstrapUser(db);
+    importLegacyAiToken(db, bootstrap.id);
 
     db.prepare(`
       INSERT INTO assets (

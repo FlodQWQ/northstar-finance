@@ -163,51 +163,68 @@ class FixedWindowRateLimiter {
   }
 }
 
-class PersistentLoginRateLimiter {
+class PersistentLoginFailureLimiter {
   public constructor(
     private readonly db: SqliteDatabase,
     private readonly limit: number,
     private readonly windowMs: number,
   ) {}
 
-  private identifierHash(identifier: string): string {
-    return createHash("sha256").update(identifier).digest("hex");
+  private purgeExpired(now: number): void {
+    this.db.prepare("DELETE FROM auth_account_limits WHERE reset_at <= ?").run(now);
   }
 
-  public consume(identifier: string): void {
+  public delayMs(userId: string): number {
     const now = Date.now();
-    const identifierHash = this.identifierHash(identifier);
+    this.purgeExpired(now);
+    const existing = this.db.prepare(`
+      SELECT attempts FROM auth_account_limits WHERE user_id = ?
+    `).get(userId) as { attempts: number } | undefined;
+    if (!existing || existing.attempts < this.limit) return 0;
+    return Math.min(2_000, (existing.attempts - this.limit + 1) * 250);
+  }
+
+  public recordFailure(userId: string): number {
+    const now = Date.now();
     this.db.transaction(() => {
-      this.db.prepare("DELETE FROM auth_login_limits WHERE reset_at <= ?").run(now);
+      this.purgeExpired(now);
       const existing = this.db.prepare(`
-        SELECT attempts, reset_at FROM auth_login_limits WHERE identifier_hash = ?
-      `).get(identifierHash) as { attempts: number; reset_at: number } | undefined;
-      if (existing && existing.attempts >= this.limit) {
-        throw new AuthError("Too many authentication attempts; try again later", 429, "RATE_LIMITED");
-      }
+        SELECT attempts FROM auth_account_limits WHERE user_id = ?
+      `).get(userId) as { attempts: number } | undefined;
       if (existing) {
         this.db.prepare(`
-          UPDATE auth_login_limits SET attempts = attempts + 1 WHERE identifier_hash = ?
-        `).run(identifierHash);
+          UPDATE auth_account_limits
+          SET attempts = MIN(attempts + 1, 1000)
+          WHERE user_id = ?
+        `).run(userId);
         return;
       }
       this.db.prepare(`
-        INSERT INTO auth_login_limits (identifier_hash, attempts, reset_at)
+        INSERT INTO auth_account_limits (user_id, attempts, reset_at)
         VALUES (?, 1, ?)
-      `).run(identifierHash, now + this.windowMs);
+      `).run(userId, now + this.windowMs);
     })();
+    return (this.db.prepare("SELECT attempts FROM auth_account_limits WHERE user_id = ?")
+      .pluck().get(userId) as number | undefined) ?? 0;
   }
 
-  public reset(identifier: string): void {
-    this.db.prepare("DELETE FROM auth_login_limits WHERE identifier_hash = ?")
-      .run(this.identifierHash(identifier));
+  public reset(userId: string): void {
+    this.db.prepare("DELETE FROM auth_account_limits WHERE user_id = ?").run(userId);
   }
 }
 
 function normalizeLoginIdentifier(value: unknown): string {
   return typeof value === "string"
-    ? value.trim().normalize("NFKC").toLowerCase().slice(0, 254)
+    ? value.trim().normalize("NFKC").toLowerCase()
     : "invalid";
+}
+
+function unknownLoginKey(identifier: string): string {
+  return createHash("sha256").update(identifier).digest("hex");
+}
+
+function waitFor(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function chooseAIProvider(providerId?: string): AIProvider {
@@ -248,7 +265,8 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   const registrationLimiter = new FixedWindowRateLimiter(5, 60 * 60 * 1_000);
   const loginIpLimiter = new FixedWindowRateLimiter(20, 15 * 60 * 1_000);
   const db = options.db ?? openDatabase({ path: options.databasePath, seed: options.seed });
-  const loginAccountLimiter = new PersistentLoginRateLimiter(db, 5, 15 * 60 * 1_000);
+  const loginAccountLimiter = new PersistentLoginFailureLimiter(db, 5, 15 * 60 * 1_000);
+  const unknownLoginLimiter = new FixedWindowRateLimiter(5, 15 * 60 * 1_000);
   const defaultOwnerId = getBootstrapUserId(db) ?? DEFAULT_OWNER_ID;
   const repository = new FinanceRepository(db, defaultOwnerId);
   const authService = options.authService ?? new AuthService(db, {
@@ -389,12 +407,32 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     const clientIp = request.ip || "unknown";
     const identifier = normalizeLoginIdentifier(request.body?.identifier);
     loginIpLimiter.consume(clientIp);
-    loginAccountLimiter.consume(identifier);
-    const created = await authService.login({
-      identifier: request.body?.identifier,
-      password: request.body?.password,
-    }, sessionMetadata(request));
-    loginAccountLimiter.reset(identifier);
+    const accountId = authService.resolveLoginUserId(request.body?.identifier);
+    if (accountId) {
+      const delay = loginAccountLimiter.delayMs(accountId);
+      if (delay > 0) await waitFor(delay);
+    }
+    let created: ReturnType<AuthService["createSession"]>;
+    try {
+      const user = await authService.authenticateCredentials(
+        request.body?.identifier,
+        request.body?.password,
+      );
+      if (!user) throw new AuthError("Invalid username or password", 401, "INVALID_CREDENTIALS");
+      if (accountId) loginAccountLimiter.reset(accountId);
+      created = authService.createSession(user.id, sessionMetadata(request));
+    } catch (error) {
+      if (!(error instanceof AuthError) || error.code !== "INVALID_CREDENTIALS") throw error;
+      if (accountId) {
+        const attempts = loginAccountLimiter.recordFailure(accountId);
+        if (attempts > 5) {
+          throw new AuthError("Too many authentication attempts; try again later", 429, "RATE_LIMITED");
+        }
+      } else {
+        unknownLoginLimiter.consume(unknownLoginKey(identifier));
+      }
+      throw error;
+    }
     setSessionCookie(response, created);
     response.json(data(sessionPayload(created), "Signed in"));
   }));

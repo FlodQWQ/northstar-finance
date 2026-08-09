@@ -73,6 +73,7 @@ describe("openDatabase", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("APP_AUTH_USERNAME", "deployment-owner");
     vi.stubEnv("APP_AUTH_PASSWORD", "correct horse battery staple");
+    vi.stubEnv("AI_API_TOKEN", "legacy-token-must-not-be-imported");
 
     const { db } = createFileDatabase(false);
     const owner = db.prepare(`
@@ -92,6 +93,7 @@ describe("openDatabase", () => {
     });
     expect(owner.password_hash).toMatch(/^\$scrypt\$/);
     expect(owner.password_hash).not.toContain("correct horse battery staple");
+    expect(db.prepare("SELECT COUNT(*) FROM api_tokens").pluck().get()).toBe(0);
   });
 
   it("allows demo records to be explicitly enabled in production", () => {
