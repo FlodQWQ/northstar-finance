@@ -9,12 +9,15 @@
     "dev:web": "vite --host 127.0.0.1 --port 5888",
     "build": "tsc --noEmit && vite build",
     "start": "cross-env NODE_ENV=production tsx server/index.ts",
+    "start:ai-worker": "cross-env NODE_ENV=production tsx server/ai-worker.ts",
     "start:win": "npm run start",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@openai/codex-sdk": "0.147.0",
+    "@opencode-ai/sdk": "1.18.15",
     "better-sqlite3": "^12.2.0",
     "croner": "^9.1.0",
     "cross-env": "^10.0.0",
@@ -24,6 +27,7 @@
     "helmet": "^8.1.0",
     "lucide-react": "^0.536.0",
     "nodemailer": "^9.0.5",
+    "opencode-ai": "1.18.15",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.8.0",

@@ -16,11 +16,8 @@ import {
   openDatabase,
   type SqliteDatabase,
 } from "./db/database";
-import {
-  DisabledAIProvider,
-  MockAIProvider,
-  type AIProvider,
-} from "./providers/ai";
+import type { AIProvider } from "./providers/ai";
+import { createApplicationAIProviderFromEnv } from "./providers/aiFactory";
 import {
   createPriceProviderFromEnv,
   PriceProviderError,
@@ -228,12 +225,6 @@ function waitFor(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function chooseAIProvider(providerId?: string): AIProvider {
-  const configured = providerId?.toLowerCase();
-  if (configured === undefined || configured === "mock") return new MockAIProvider();
-  return new DisabledAIProvider();
-}
-
 function resolvePublicAICommandEndpoint(appBaseUrl: string): string {
   if (!appBaseUrl) return "/api/ai/commands/execute";
 
@@ -275,9 +266,9 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     production,
     firstUserIsOwner: !production,
   });
-  const aiProviderFor = (ownerRepository: FinanceRepository) =>
-    options.aiProvider ?? chooseAIProvider(ownerRepository.getSettings().aiProvider);
-  const aiProvider = aiProviderFor(repository);
+  // AI credentials and runtime selection are deployment-global. Every tenant uses
+  // the same isolated worker, while research results remain scoped by repository.
+  const aiProvider = options.aiProvider ?? createApplicationAIProviderFromEnv();
   const priceProvider = options.priceProvider ?? createPriceProviderFromEnv();
   const emailOutboxFor = (ownerRepository: FinanceRepository) =>
     options.emailOutbox ?? new SmtpEmailOutbox(db, ownerRepository);
@@ -286,7 +277,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     new MonitorService(
       db,
       ownerRepository,
-      aiProviderFor(ownerRepository),
+      aiProvider,
       emailOutboxFor(ownerRepository),
     );
   const monitorService = monitorServiceFor(repository);
@@ -311,7 +302,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
       monitorService: new MonitorService(
         db,
         ownerRepository,
-        aiProviderFor(ownerRepository),
+        aiProvider,
         ownerEmailOutbox,
       ),
       commandService: new AICommandService(db, ownerRepository),
@@ -793,7 +784,8 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   app.patch("/api/settings", (request, response) => {
     const input = parse(settingsPatchSchema, request.body);
     const authenticated = services(response).session;
-    const ownerOnlyKeys = ["proxyUrl", "aiProvider", "aiBaseUrl", "aiModel"] as const;
+    const deploymentOnlyKeys = ["aiProvider", "aiBaseUrl", "aiModel"] as const;
+    const ownerOnlyKeys = ["proxyUrl", ...deploymentOnlyKeys] as const;
     if (
       authenticated &&
       authenticated.user.role !== "owner" &&
@@ -803,6 +795,13 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
         "Only the application owner can change connection settings",
         403,
         "OWNER_REQUIRED",
+      );
+    }
+    if (deploymentOnlyKeys.some((key) => input[key] !== undefined)) {
+      throw new DomainError(
+        "AI runtime settings are managed by the deployment environment",
+        409,
+        "DEPLOYMENT_SETTING",
       );
     }
     response.json(data(services(response).repository.updateSettings(input), "Settings saved"));
@@ -817,7 +816,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
         "OWNER_REQUIRED",
       );
     }
-    if (kind === "ai") return aiProviderFor(requestServices.repository).testConnection();
+    if (kind === "ai") return aiProvider.testConnection();
     if (kind === "price") return priceProvider.testConnection();
     if (kind === "email" || kind === "smtp") return requestServices.emailOutbox.testConnection();
     throw new DomainError("Unknown connection type", 404, "CONNECTION_TYPE_NOT_FOUND");

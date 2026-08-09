@@ -1,6 +1,6 @@
 # Northstar Finance
 
-Northstar Finance 是一个自托管的个人资产与事件跟踪面板。当前版本包含直接资产、预期资产、价格及状态历史、事件计划和执行记录。系统默认可以在没有 AI、行情源或 SMTP 的情况下运行；这些能力通过服务端 provider 边界逐步接入。
+Northstar Finance 是一个自托管的个人资产与事件跟踪面板。当前版本包含直接资产、预期资产、价格及状态历史、事件计划和执行记录。系统默认可以在没有 AI、行情源或 SMTP 的情况下运行；联网研究支持 Codex SDK，并可回退到 OpenCode + Agent-Reach/Exa。
 
 ## 本地开发（Windows）
 
@@ -61,15 +61,17 @@ npm run start
 | `SMTP_SECURE` | `false` | 端口 `465` 通常设为 `true`；`587` 使用 STARTTLS |
 | `SMTP_USER` / `SMTP_PASS` | 空 | SMTP 凭据，生产环境建议使用应用专用密码 |
 | `SMTP_FROM` | 空 | 发件人地址；SMTP 连接参数只能由部署环境配置，不接受账户 API 修改 |
-| `AI_PROVIDER` | `none` | 当前仅支持 `none`/`disabled` 和离线 `mock`；其他值尚未接入真实 provider |
+| `AI_PROVIDER` | `disabled` | `auto` 优先 Codex 并回退 OpenCode；也可固定为 `codex-sdk`、`opencode-agent-reach` 或 `disabled` |
 | `AI_API_TOKEN` | 空 | 仅用于迁移 v1 全局 AI token；v2 使用账户内创建的 scoped API token |
-| `OPENAI_API_KEY` | 空 | 为未来 OpenAI provider 预留；当前不会发起 OpenAI API 请求 |
-| `OPENAI_BASE_URL` | OpenAI API | 为未来 OpenAI 兼容 provider 预留的服务地址 |
-| `OPENAI_MODEL` | 空 | 为未来 OpenAI provider 预留的模型标识 |
+| `AI_WORKER_URL` / `AI_WORKER_TOKEN` | 本地 worker / 空 | 主应用访问隔离 AI worker 的内部地址与 Bearer token；生产 token 必须随机生成 |
+| `AI_REQUEST_TIMEOUT_MS` | `200000` | 主应用等待 worker 的总时限 |
+| `AI_PROVIDER_TIMEOUT_MS` / `AI_JOB_TIMEOUT_MS` | `90000` / `190000` | 单个 provider 和包含一次回退的完整任务时限 |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | 空 / OpenAI API | Codex 和 OpenCode 的服务端认证与 API 地址，只注入 AI worker |
+| `CODEX_MODEL` / `CODEX_MODEL_REASONING_EFFORT` | 空 / `medium` | Codex 模型与推理强度；空模型由 Codex 运行时选择 |
+| `OPENCODE_MODEL` | 空 | OpenCode 的 `provider/model`；也可拆分为 `OPENCODE_PROVIDER_ID` 和 `OPENCODE_MODEL_ID` |
 | `HTTP_PROXY` / `HTTPS_PROXY` | 空 | 服务端行情、新闻和 AI 出站代理 |
 | `NO_PROXY` | `localhost,127.0.0.1` | 不经过代理的地址列表 |
 | `CONTAINER_HTTP_PROXY` / `CONTAINER_HTTPS_PROXY` | 空 | 仅 Compose 使用，映射为容器内标准代理变量 |
-| `FINANCE_ENV_FILE` | `.env` | 仅 Compose 使用，指定传入容器的环境文件 |
 
 所有金额、价格和数量应作为十进制定点值处理，不应经过 JavaScript 浮点数计算。SQLite 数据目录和备份包含个人财务信息，应限制访问权限并加密异地备份。
 
@@ -132,9 +134,29 @@ Content-Type: application/json
 
 `confirmed` 是调用方声明的防误操作开关，不等同于独立的人类审批或签名。当前 MVP 尚无 proposal 审批工作流；接入自动化 AI 时，应让编排层在明确的用户授权后才设置该字段，不能让模型自行决定。
 
+## AI 联网研究
+
+AI 研究运行在独立 worker 中，主应用只通过内部 Bearer token 调用它。worker 不挂载 SQLite 数据卷，也不接收 Session、SMTP 或资产 API token；模型凭据则不会注入主应用。事件说明和搜索到的网页都按不可信输入处理。
+
+`auto` 模式固定先使用官方 `@openai/codex-sdk`。每次 Codex 线程使用只读沙箱、禁止审批并设置 `webSearchMode: live`；本地 shell、统一执行、多代理、hooks 和 connector 工具均被禁用，子进程也不继承环境变量。如果没有 SDK 产生的 `web_search` 项，整次结果视为失败并进入备用 provider。备用路径先通过 Agent-Reach/MCPorter 以固定参数调用 Exa，再由官方 OpenCode SDK v2 在无工具权限的临时会话中归纳搜索结果。这样联网动作是编排层强制执行的，不依赖模型是否遵守“请搜索”的提示。Agent-Reach 固定在提交 `1221ecd0c3e0502ee37406f03543bedf7503f2c7`，MCPorter 固定为 `0.13.2`，不会在容器启动时运行未锁版本的安装器。
+
+模型输出按同一份严格 JSON Schema 约束并最终通过 Zod 运行时校验。成功结果至少包含一个绝对 HTTP(S) 来源；OpenCode 来源还必须实际出现在 Agent-Reach/Exa 的原始搜索输出中。摘要、变化、实际 provider 和来源会写入对应账户的运行记录。设置页“测试 AI”会发起一次真实的轻量联网 canary，不是只检查端口。
+
+Docker 中的最小配置如下，`AI_WORKER_TOKEN` 应使用 `openssl rand -hex 32` 等方式生成：
+
+```dotenv
+AI_PROVIDER=auto
+AI_WORKER_TOKEN=<long-random-token>
+OPENAI_API_KEY=<server-side-api-key>
+CODEX_MODEL=
+OPENCODE_MODEL=opencode/big-pickle
+```
+
+没有模型凭据时平台仍可正常管理资产，但 AI 研究会明确失败，不能把 worker 健康检查通过理解为联网 canary 已通过。
+
 ## Docker
 
-镜像使用固定 Node 24 Debian slim 基础版本和多阶段构建。运行层只保留生产依赖，以非 root 用户启动单个 Node 进程；SQLite 数据保存在命名卷 `finance-data`。生产环境默认不写入演示资产，只有显式设置 `CONTAINER_SEED_DEMO_DATA=true` 才会启用演示数据。
+镜像使用固定 Node 24 Debian slim 基础版本和多阶段构建。同一镜像分别启动主应用和 AI worker 两个非 root 容器；SQLite 只挂载到主应用的 `finance-data`，AI 状态使用独立的 `ai-state`。生产环境默认不写入演示资产，只有显式设置 `CONTAINER_SEED_DEMO_DATA=true` 才会启用演示数据。
 
 ### 本地构建与运行
 
@@ -146,7 +168,7 @@ docker compose ps
 docker compose logs -f finance-dashboard
 ```
 
-默认端口映射是 `127.0.0.1:5888:5888`，不会直接暴露到公网。本机可访问 <http://127.0.0.1:5888>。Compose 从被 Git 忽略的 `.env` 文件向容器传递应用配置；可通过 `FINANCE_ENV_FILE` 指向另一个环境文件。`.env`、`docker compose config` 输出和 `docker inspect` 输出都可能包含密钥，不应提交或公开分享。
+默认端口映射是 `127.0.0.1:5888:5888`，不会直接暴露到公网。本机可访问 <http://127.0.0.1:5888>。Compose 从被 Git 忽略的 `.env` 文件读取插值；使用其他环境文件时传入 `docker compose --env-file <path> ...`。`.env`、`docker compose config` 输出和 `docker inspect` 输出都可能包含密钥，不应提交或公开分享。
 
 ### 发布到 Docker Hub
 
@@ -180,7 +202,7 @@ VPS 安装 Docker Engine 和 Compose 插件后，将 `compose.vps.yml` 与环境
 ```bash
 cp .env.vps.example .env
 chmod 600 .env
-# 编辑 .env：填写 DOCKER_IMAGE、固定 IMAGE_TAG、公开 URL、注册模式和可选 SMTP/AI 配置
+# 编辑 .env：填写 DOCKER_IMAGE、固定 IMAGE_TAG、公开 URL、AI_WORKER_TOKEN、注册模式和可选 SMTP/AI 配置
 docker compose --env-file .env -f compose.vps.yml pull
 docker compose --env-file .env -f compose.vps.yml up -d
 docker compose --env-file .env -f compose.vps.yml ps

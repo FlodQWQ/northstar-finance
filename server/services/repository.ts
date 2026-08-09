@@ -8,6 +8,7 @@ import type {
   MonitorRun,
   TrackedEvent,
 } from "../../shared/types";
+import { deploymentAIStatus } from "../providers/aiFactory";
 import { DEFAULT_OWNER_ID, type SqliteDatabase } from "../db/database";
 import type {
   AssetCreateInput,
@@ -41,6 +42,35 @@ function parseJsonArray<T>(value: unknown): T[] {
     return Array.isArray(parsed) ? (parsed as T[]) : [];
   } catch {
     return [];
+  }
+}
+
+function parseMonitorSources(value: unknown): Pick<MonitorRun, "sources" | "searchEvidence"> {
+  try {
+    const parsed = JSON.parse(stringValue(value, "[]")) as unknown;
+    if (Array.isArray(parsed)) {
+      return { sources: parsed as MonitorRun["sources"] };
+    }
+    if (!parsed || typeof parsed !== "object") return { sources: [] };
+    const record = parsed as { sources?: unknown; searchEvidence?: unknown };
+    const sources = Array.isArray(record.sources) ? record.sources as MonitorRun["sources"] : [];
+    const evidence = record.searchEvidence;
+    if (
+      evidence
+      && typeof evidence === "object"
+      && (evidence as { mode?: unknown }).mode === "live"
+      && typeof (evidence as { query?: unknown }).query === "string"
+      && typeof (evidence as { searchedAt?: unknown }).searchedAt === "string"
+      && Array.isArray((evidence as { observedUrls?: unknown }).observedUrls)
+    ) {
+      return {
+        sources,
+        searchEvidence: evidence as NonNullable<MonitorRun["searchEvidence"]>,
+      };
+    }
+    return { sources };
+  } catch {
+    return { sources: [] };
   }
 }
 
@@ -150,6 +180,7 @@ export function mapTrackedEvent(row: Row): VersionedTrackedEvent {
 }
 
 export function mapMonitorRun(row: Row): MonitorRun {
+  const sourceData = parseMonitorSources(row.sources_json);
   return {
     id: stringValue(row.id),
     eventId: stringValue(row.event_id ?? row.expected_asset_id),
@@ -159,7 +190,7 @@ export function mapMonitorRun(row: Row): MonitorRun {
     finishedAt: row.finished_at === null ? null : stringValue(row.finished_at),
     summary: stringValue(row.summary),
     changeSummary: stringValue(row.change_summary),
-    sources: parseJsonArray<{ title: string; url: string }>(row.sources_json),
+    ...sourceData,
     provider: stringValue(row.provider),
     emailStatus: stringValue(row.email_status) as MonitorRun["emailStatus"],
     error: stringValue(row.error),
@@ -727,18 +758,20 @@ export class FinanceRepository {
     const rows = this.db.prepare("SELECT key, value FROM settings WHERE owner_id = ?")
       .all(this.ownerId) as Array<{ key: string; value: string }>;
     const values = Object.fromEntries(rows.map((row) => [row.key, row.value]));
-    const configuredAiProvider = values.aiProvider ?? "none";
-    const aiProvider = configuredAiProvider === "none" ? "disabled" : configuredAiProvider;
+    const deploymentAI = deploymentAIStatus();
     const notificationEmail = values.notificationEmail ?? "";
     return {
       baseCurrency: values.baseCurrency ?? "USD",
       timezone: values.timezone ?? "Asia/Shanghai",
       locale: values.locale ?? "zh-CN",
       proxyUrl: values.proxyUrl ?? "",
-      aiProvider,
-      aiBaseUrl: values.aiBaseUrl ?? "",
-      aiModel: values.aiModel ?? "",
-      aiConfigured: aiProvider === "mock",
+      aiProvider: deploymentAI.provider,
+      aiBaseUrl: process.env.OPENAI_BASE_URL?.trim() ?? "",
+      aiModel: process.env.CODEX_MODEL?.trim()
+        || process.env.OPENCODE_MODEL?.trim()
+        || process.env.OPENAI_MODEL?.trim()
+        || "",
+      aiConfigured: deploymentAI.configured,
       smtpHost: values.smtpHost ?? "",
       smtpPort: Number(values.smtpPort ?? 587),
       smtpSecure: values.smtpSecure === "true",

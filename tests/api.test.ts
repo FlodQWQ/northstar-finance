@@ -1,7 +1,7 @@
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type FinanceApp } from "../server/app";
-import { MockAIProvider } from "../server/providers/ai";
+import { MockAIProvider, type AIProvider } from "../server/providers/ai";
 
 let app: FinanceApp;
 
@@ -243,5 +243,77 @@ describe("finance API", () => {
       emailEnabled: true,
       emailTo: "owner@example.com",
     });
+  });
+
+  it("persists live-search evidence and reads legacy source arrays", async () => {
+    const sources = [{ title: "Protocol announcement", url: "https://example.com/announcement" }];
+    const searchEvidence = {
+      mode: "live" as const,
+      query: "Protocol announcement eligibility",
+      searchedAt: "2026-08-10T03:00:00.000Z",
+      observedUrls: ["https://example.com/announcement", "https://example.com/status"],
+    };
+    const evidenceProvider: AIProvider = {
+      id: "codex-sdk",
+      async research() {
+        return {
+          summary: "The eligibility announcement is live.",
+          changeSummary: "An official announcement was published.",
+          changed: true,
+          sources,
+          provider: "codex-sdk",
+          searchEvidence,
+        };
+      },
+      async testConnection() {
+        return { ok: true, status: "connected", message: "Evidence provider is ready." };
+      },
+    };
+    const evidenceApp = createApp({
+      databasePath: ":memory:",
+      seed: false,
+      aiProvider: evidenceProvider,
+      serveStatic: false,
+      disableAuthenticationForTests: true,
+    });
+
+    try {
+      await request(evidenceApp)
+        .post("/api/expected")
+        .send({
+          id: "evidence-expected",
+          name: "Evidence airdrop",
+          currency: "USD",
+          sourceUrl: "https://example.com/announcement",
+        })
+        .expect(201);
+
+      const checked = await request(evidenceApp)
+        .post("/api/expected/evidence-expected/check")
+        .send({})
+        .expect(200);
+      const runId = checked.body.data.run.id as string;
+      expect(checked.body.data.run).toMatchObject({ sources, searchEvidence });
+
+      const stored = evidenceApp.finance.db.prepare(
+        "SELECT sources_json FROM monitor_runs WHERE id = ?",
+      ).get(runId) as { sources_json: string };
+      expect(JSON.parse(stored.sources_json)).toEqual({ sources, searchEvidence });
+
+      const listed = await request(evidenceApp)
+        .get("/api/expected/evidence-expected/runs")
+        .expect(200);
+      expect(listed.body.data[0]).toMatchObject({ id: runId, sources, searchEvidence });
+
+      const legacySources = [{ title: "Legacy source", url: "https://example.com/legacy" }];
+      evidenceApp.finance.db.prepare("UPDATE monitor_runs SET sources_json = ? WHERE id = ?")
+        .run(JSON.stringify(legacySources), runId);
+
+      const legacy = await request(evidenceApp).get(`/api/runs/${runId}`).expect(200);
+      expect(legacy.body.data.sources).toEqual(legacySources);
+      expect(legacy.body.data).not.toHaveProperty("searchEvidence");
+    } finally {
+      evidenceApp.finance.close();
+    }
   });
 });

@@ -6,17 +6,44 @@ services:
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 20s
-    env_file:
-      - "${FINANCE_ENV_FILE:-.env}"
+    depends_on:
+      ai-worker:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: "5888"
       HOST: 0.0.0.0
+      TZ: "${TZ:-Asia/Shanghai}"
       DATABASE_PATH: /app/data/finance.sqlite
       SEED_DEMO_DATA: "${CONTAINER_SEED_DEMO_DATA:-false}"
-      HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
-      HTTPS_PROXY: "${CONTAINER_HTTPS_PROXY:-}"
-      NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1}"
+      APP_BASE_URL: "${APP_BASE_URL:?Set APP_BASE_URL in the env file}"
+      REGISTRATION_MODE: "${REGISTRATION_MODE:-closed}"
+      APP_AUTH_USERNAME: "${APP_AUTH_USERNAME:-}"
+      APP_AUTH_PASSWORD: "${APP_AUTH_PASSWORD:-}"
+      AI_API_TOKEN: "${AI_API_TOKEN:-}"
+      SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-true}"
+      SCHEDULER_POLL_MS: "${SCHEDULER_POLL_MS:-30000}"
+      SCHEDULER_LEASE_MS: "${SCHEDULER_LEASE_MS:-600000}"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_SECURE: "${SMTP_SECURE:-false}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASS: "${SMTP_PASS:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+      PRICE_PROVIDER: "${PRICE_PROVIDER:-manual}"
+      PRICE_PROXY: "${PRICE_PROXY:-}"
+      PRICE_TIMEOUT_MS: "${PRICE_TIMEOUT_MS:-6000}"
+      PRICE_MAX_QUOTE_TIME_MS: "${PRICE_MAX_QUOTE_TIME_MS:-15000}"
+      PRICE_CACHE_TTL_MS: "${PRICE_CACHE_TTL_MS:-15000}"
+      PRICE_SYMBOL_ALIASES_JSON: "${PRICE_SYMBOL_ALIASES_JSON:-{}}"
+      PRICE_COINGECKO_IDS_JSON: "${PRICE_COINGECKO_IDS_JSON:-{}}"
+      AI_PROVIDER: "${AI_PROVIDER:-disabled}"
+      AI_WORKER_URL: http://ai-worker:5890
+      AI_WORKER_TOKEN: "${AI_WORKER_TOKEN:?Set AI_WORKER_TOKEN in the env file}"
+      AI_REQUEST_TIMEOUT_MS: "${AI_REQUEST_TIMEOUT_MS:-200000}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      CODEX_MODEL: "${CODEX_MODEL:-}"
+      OPENCODE_MODEL: "${OPENCODE_MODEL:-}"
     ports:
       - "127.0.0.1:${HOST_PORT:-5888}:5888"
     volumes:
@@ -37,6 +64,70 @@ services:
         max-size: 10m
         max-file: "5"
 
+  ai-worker:
+    image: "${DOCKER_IMAGE:?Set DOCKER_IMAGE in the env file}:${IMAGE_TAG:-latest}"
+    pull_policy: always
+    command: ["node", "--import", "tsx", "server/ai-worker.ts"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    environment:
+      NODE_ENV: production
+      AI_WORKER_PORT: "5890"
+      AI_WORKER_HOST: 0.0.0.0
+      AI_WORKER_TOKEN: "${AI_WORKER_TOKEN:?Set AI_WORKER_TOKEN in the env file}"
+      AI_PROVIDER: "${AI_PROVIDER:-disabled}"
+      AI_PROVIDER_TIMEOUT_MS: "${AI_PROVIDER_TIMEOUT_MS:-90000}"
+      AI_JOB_TIMEOUT_MS: "${AI_JOB_TIMEOUT_MS:-190000}"
+      AI_MAX_CONCURRENCY: "${AI_MAX_CONCURRENCY:-2}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      CODEX_MODEL: "${CODEX_MODEL:-}"
+      CODEX_MODEL_REASONING_EFFORT: "${CODEX_MODEL_REASONING_EFFORT:-medium}"
+      OPENCODE_MODEL: "${OPENCODE_MODEL:-}"
+      OPENCODE_PROVIDER_ID: "${OPENCODE_PROVIDER_ID:-}"
+      OPENCODE_MODEL_ID: "${OPENCODE_MODEL_ID:-}"
+      OPENCODE_ENABLE_EXA: "1"
+      OPENCODE_WEBSEARCH_PROVIDER: exa
+      MCPORTER_CONFIG: /opt/agent-reach/config/mcporter.json
+      HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${CONTAINER_HTTPS_PROXY:-}"
+      NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,ai-worker,finance-dashboard}"
+      NODE_USE_ENV_PROXY: "1"
+      HOME: /var/lib/northstar-ai/home
+      CODEX_HOME: /var/lib/northstar-ai/codex
+      XDG_CONFIG_HOME: /var/lib/northstar-ai/config
+      XDG_CACHE_HOME: /var/lib/northstar-ai/cache
+      XDG_DATA_HOME: /var/lib/northstar-ai/data
+      XDG_STATE_HOME: /var/lib/northstar-ai/state
+    expose:
+      - "5890"
+    volumes:
+      - ai-state:/var/lib/northstar-ai
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /work:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5890/health').then((r) => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
 volumes:
   finance-data:
     name: northstar-finance-data
+  ai-state:
+    name: northstar-finance-ai-state

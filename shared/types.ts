@@ -104,6 +104,12 @@ export interface MonitorRun {
   summary: string;
   changeSummary: string;
   sources: Array<{ title: string; url: string }>;
+  searchEvidence?: {
+    mode: "live";
+    query: string;
+    searchedAt: string;
+    observedUrls: string[];
+  };
   provider: string;
   emailStatus: "skipped" | "pending" | "sent" | "failed";
   error: string;

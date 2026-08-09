@@ -50,9 +50,6 @@ export default function SettingsPage({ user }: { user: AuthUser }) {
         ...(user.role === "owner"
           ? {
               proxyUrl: form.proxyUrl,
-              aiProvider: form.aiProvider,
-              aiBaseUrl: form.aiBaseUrl,
-              aiModel: form.aiModel,
             }
           : {}),
       };
@@ -130,7 +127,7 @@ export default function SettingsPage({ user }: { user: AuthUser }) {
 
             {user.role === "owner" ? <section className="surface settings-section" id="network">
               <div className="settings-section-heading"><span><Globe2 size={19} /></span><div><h2>网络与价格数据</h2><p>所有联网查询均由服务端发起。</p></div></div>
-              <FormField label="HTTP 代理" hint="留空表示直接联网；本地代理可使用 http://127.0.0.1:7890">
+              <FormField label="HTTP 代理" hint="容器访问宿主机代理时使用 http://host.docker.internal:7890">
                 <input type="url" value={form.proxyUrl} onChange={(event) => setForm({ ...form, proxyUrl: event.target.value })} placeholder="http://127.0.0.1:7890" />
               </FormField>
               <div className="connection-row">
@@ -140,19 +137,19 @@ export default function SettingsPage({ user }: { user: AuthUser }) {
             </section> : null}
 
             {user.role === "owner" ? <section className="surface settings-section" id="ai">
-              <div className="settings-section-heading"><span><Bot size={19} /></span><div><h2>AI 服务</h2><p>连接配置在服务重启后生效，不直接修改真实余额。</p></div><StatusBadge label={form.aiConfigured ? "已配置" : "未配置"} tone={form.aiConfigured ? "positive" : "warning"} /></div>
+              <div className="settings-section-heading"><span><Bot size={19} /></span><div><h2>AI 服务</h2><p>由部署环境管理；连接测试会执行一次真实联网搜索。</p></div><StatusBadge label={form.aiConfigured ? "已配置" : "未配置"} tone={form.aiConfigured ? "positive" : "warning"} /></div>
               <div className="form-grid two-column">
-                <FormField label="提供方">
-                  <select value={form.aiProvider} onChange={(event) => setForm({ ...form, aiProvider: event.target.value })}>
-                    <option value="mock">本地模拟（开发）</option><option value="openai-compatible">OpenAI 兼容接口（预留）</option><option value="codex-cli">Codex CLI（预留）</option><option value="disabled">暂不启用</option>
+                <FormField label="运行模式">
+                  <select value={form.aiProvider} disabled>
+                    <option value="auto">自动 · Codex 优先</option><option value="codex-sdk">Codex SDK</option><option value="opencode-agent-reach">OpenCode + Agent-Reach</option><option value="disabled">已停用</option>{form.aiProvider === "mock" ? <option value="mock">本地模拟</option> : null}
                   </select>
                 </FormField>
                 <FormField label="模型">
-                  <input value={form.aiModel} onChange={(event) => setForm({ ...form, aiModel: event.target.value })} placeholder="模型名称" />
+                  <input value={form.aiModel} disabled placeholder="由服务端选择" />
                 </FormField>
               </div>
               <FormField label="API Base URL">
-                <input type="url" value={form.aiBaseUrl} onChange={(event) => setForm({ ...form, aiBaseUrl: event.target.value })} placeholder="https://api.openai.com/v1" />
+                <input type="url" value={form.aiBaseUrl} disabled placeholder="由服务端配置" />
               </FormField>
               <div className="section-actions"><Button className="secondary" type="button" onClick={() => void testConnection("ai")} disabled={testing !== null}>{testing === "ai" ? <LoaderCircle className="spin" size={16} /> : <Bot size={16} />} 测试 AI</Button></div>
             </section> : null}

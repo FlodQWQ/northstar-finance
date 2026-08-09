@@ -67,8 +67,12 @@ export class MonitorService {
       new Date().toISOString(),
       result.summary,
       result.changeSummary,
-      JSON.stringify(result.sources),
-      this.aiProvider.id,
+      JSON.stringify(
+        result.searchEvidence
+          ? { sources: result.sources, searchEvidence: result.searchEvidence }
+          : result.sources,
+      ),
+      result.provider ?? this.aiProvider.id,
       this.repository.ownerId,
       runId,
     );
@@ -203,7 +207,7 @@ export class MonitorService {
           result.changed ? "Research update" : "Research check: no change",
           result.summary,
           result.sources[0]?.url ?? expected.sourceUrl,
-          this.aiProvider.id,
+          result.provider ?? this.aiProvider.id,
           now,
         );
         // The AI result updates research metadata only. It cannot alter stage, value, or holdings.
