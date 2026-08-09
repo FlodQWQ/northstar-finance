@@ -70,7 +70,7 @@ export const assetCreateSchema = z
     kind: assetKindSchema,
     account: z.string().trim().max(160).default(""),
     currency,
-    quantity: nonNegativeDecimalString.default("0"),
+    quantity: decimalString.default("0"),
     unitCost: nonNegativeDecimalString.default("0"),
     currentPrice: nonNegativeDecimalString.default("0"),
     priceMode: priceModeSchema.default("manual"),

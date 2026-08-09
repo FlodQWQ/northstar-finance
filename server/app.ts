@@ -22,7 +22,8 @@ import {
   type AIProvider,
 } from "./providers/ai";
 import {
-  ManualPriceProvider,
+  createPriceProviderFromEnv,
+  PriceProviderError,
   type PriceProvider,
 } from "./providers/price";
 import {
@@ -277,7 +278,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   const aiProviderFor = (ownerRepository: FinanceRepository) =>
     options.aiProvider ?? chooseAIProvider(ownerRepository.getSettings().aiProvider);
   const aiProvider = aiProviderFor(repository);
-  const priceProvider = options.priceProvider ?? new ManualPriceProvider();
+  const priceProvider = options.priceProvider ?? createPriceProviderFromEnv();
   const emailOutboxFor = (ownerRepository: FinanceRepository) =>
     options.emailOutbox ?? new SmtpEmailOutbox(db, ownerRepository);
   const emailOutbox = emailOutboxFor(repository);
@@ -882,6 +883,12 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     }
     if (error instanceof DomainError) {
       response.status(error.status).json({ error: { code: error.code, message: error.message } });
+      return;
+    }
+    if (error instanceof PriceProviderError) {
+      response.status(error.status).json({
+        error: { code: error.code, message: error.message },
+      });
       return;
     }
     if (error instanceof SyntaxError && "body" in error) {

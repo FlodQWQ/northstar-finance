@@ -112,7 +112,7 @@ export default function SettingsPage({ user }: { user: AuthUser }) {
               <div className="form-grid two-column">
                 <FormField label="本位币" required>
                   <select value={form.baseCurrency} onChange={(event) => setForm({ ...form, baseCurrency: event.target.value })}>
-                    <option value="CNY">CNY · 人民币</option><option value="USD">USD · 美元</option><option value="HKD">HKD · 港币</option><option value="EUR">EUR · 欧元</option>
+                    <option value="CNY">CNY · 人民币</option><option value="USD">USD · 美元</option><option value="USDT">USDT · 泰达币</option><option value="HKD">HKD · 港币</option><option value="EUR">EUR · 欧元</option>
                   </select>
                 </FormField>
                 <FormField label="时区" required>

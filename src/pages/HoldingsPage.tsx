@@ -3,6 +3,8 @@ import {
   ArrowUpFromLine,
   Banknote,
   Filter,
+  Globe2,
+  LoaderCircle,
   PencilLine,
   Plus,
   RefreshCw,
@@ -108,7 +110,8 @@ function CreateAssetSheet({ open, onClose, onCreated }: { open: boolean; onClose
           <h3>期初持仓</h3>
           <div className="form-grid two-column">
             <FormField label="数量" required>
-              <input type="number" inputMode="decimal" step="any" min="0" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} required />
+              <input type="number" inputMode="decimal" step="any" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} required />
+              <small className="field-hint">负债或借贷头寸可使用负数。</small>
             </FormField>
             <FormField label="计价币种" required>
               <input value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value.toUpperCase() })} maxLength={8} required />
@@ -221,7 +224,25 @@ function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose:
   const [source, setSource] = useState(asset?.priceSource || "手动录入");
   const [asOf, setAsOf] = useState(toLocalInputValue(new Date().toISOString()));
   const [submitting, setSubmitting] = useState(false);
+  const [fetching, setFetching] = useState(false);
   const { notify } = useToast();
+
+  const fetchProviderPrice = async () => {
+    if (!asset) return;
+    setFetching(true);
+    try {
+      const updated = await api.assets.updatePrice(asset.id, {});
+      setPrice(updated.currentPrice);
+      setSource(updated.priceSource);
+      setAsOf(toLocalInputValue(updated.priceUpdatedAt));
+      onSaved();
+      notify(`已从 ${updated.priceSource} 获取价格`);
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "获取数据源价格失败", "error");
+    } finally {
+      setFetching(false);
+    }
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -267,6 +288,11 @@ function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose:
           <div className="form-preview">
             <span>更新后持仓估值</span>
             <strong>{formatMoney(projected, asset?.currency || "CNY")}</strong>
+          </div>
+          <div className="section-actions">
+            <Button className="secondary" type="button" onClick={() => void fetchProviderPrice()} disabled={fetching || submitting}>
+              {fetching ? <LoaderCircle className="spin" size={16} /> : <Globe2 size={16} />} {fetching ? "正在获取" : "从数据源获取"}
+            </Button>
           </div>
         </div>
       </SheetForm>

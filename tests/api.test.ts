@@ -88,6 +88,31 @@ describe("finance API", () => {
     });
   });
 
+  it("preserves a negative quantity for a liability holding", async () => {
+    const response = await request(app)
+      .post("/api/assets")
+      .send({
+        id: "usdt-debt",
+        name: "USDT debt",
+        symbol: "USDT",
+        kind: "other",
+        account: "Exchange liability",
+        currency: "USDT",
+        quantity: "-4000",
+        unitCost: "1",
+        currentPrice: "1",
+        priceMode: "manual",
+        priceSource: "stablecoin",
+      })
+      .expect(201);
+
+    expect(response.body.data).toMatchObject({
+      quantity: "-4000",
+      marketValue: "-4000",
+      costBasis: "-4000",
+    });
+  });
+
   it("updates an expected asset status and keeps AI research as an audited update", async () => {
     await request(app)
       .post("/api/expected")

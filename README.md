@@ -256,6 +256,14 @@ docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-ba
 
 事件计划、下一次运行时间与执行记录必须持久化到 SQLite。进程重启后调度器应恢复到期任务，并通过数据库唯一约束避免同一计划时点被重复认领。SMTP 主机、端口、发件人和凭据只从服务器环境读取，账户仅保存自己的默认收件地址，避免账户输入改变携带全局凭据的连接目标。SMTP 无法保证严格的 exactly-once；邮件应通过持久化 outbox、有限重试和可见的执行状态降低丢失与重复风险。
 
+### 公开行情源
+
+`PriceProvider` 的默认值仍是 `manual`，不会产生外部请求。需要按资产账户自动更新价格时，在服务端环境设置 `PRICE_PROVIDER=multi`（或指定 `binance`、`okx`、`bitget`、`bybit`、`gate`、`coingecko` 作为首选源）。`multi` 会先根据账户名选择交易所，再按 Binance、OKX、Bitget、Bybit、Gate，最后 CoinGecko 的顺序回退；交易所 API 均为公开行情接口，不需要账户密钥。
+
+请求只允许固定的 HTTPS 域名，禁止重定向，单次请求有超时和 512 KiB 响应上限，报价链有总时限并使用短缓存。需要代理时使用 `PRICE_PROXY=http://host:port`；Docker 容器不能填写容器内的 `127.0.0.1`，应填写容器可达的宿主机地址。也可使用 `PRICE_TIMEOUT_MS`、`PRICE_MAX_QUOTE_TIME_MS` 和 `PRICE_CACHE_TTL_MS` 调整网络参数。
+
+账户名仅用于选源，不会被当作 URL。`NVDAon`、`QQQon`、`IBMon` 等 Ondo 代币会按 OKX 的 `X...`、Bitget 的 `R...` 市场别名查询；`spSEI`、`sUSDat`、`preOPAI` 等无交易所现货对的资产会回退 CoinGecko。新增或纠正映射可通过受控的 `PRICE_SYMBOL_ALIASES_JSON`、`PRICE_COINGECKO_IDS_JSON` 配置，不要把用户输入直接拼接为 endpoint。
+
 ### 当前 AI 实现状态
 
 当前版本只实现了禁用 provider 和用于本地演示、测试的离线 mock provider。以下三种方案都只是预留适配边界，尚未接入：
