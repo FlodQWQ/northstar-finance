@@ -1,0 +1,221 @@
+import request from "supertest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createApp, type FinanceApp } from "../server/app";
+import { MockAIProvider } from "../server/providers/ai";
+
+let app: FinanceApp;
+
+beforeEach(() => {
+  app = createApp({
+    databasePath: ":memory:",
+    seed: false,
+    aiProvider: new MockAIProvider(),
+    serveStatic: false,
+  });
+});
+
+afterEach(() => {
+  app.finance.close();
+});
+
+describe("finance API", () => {
+  it("reports API and database health", async () => {
+    const response = await request(app).get("/api/health").expect(200);
+
+    expect(response.headers["x-powered-by"]).toBeUndefined();
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body.data).toMatchObject({
+      status: "ok",
+      database: { status: "ok" },
+    });
+    expect(Date.parse(response.body.data.timestamp)).not.toBeNaN();
+  });
+
+  it("creates a direct asset and records an exact manual price update", async () => {
+    const createResponse = await request(app)
+      .post("/api/assets")
+      .send({
+        id: "asset-btc",
+        name: "Bitcoin",
+        symbol: "BTC",
+        kind: "crypto",
+        account: "Cold wallet",
+        currency: "USD",
+        quantity: "0.125",
+        unitCost: "42000.5",
+        currentPrice: "68000.25",
+        priceMode: "manual",
+        priceSource: "manual",
+      })
+      .expect(201);
+
+    expect(createResponse.body.data).toMatchObject({
+      id: "asset-btc",
+      quantity: "0.125",
+      currentPrice: "68000.25",
+      marketValue: "8500.03125",
+      costBasis: "5250.0625",
+    });
+
+    const asOf = new Date(Date.parse(createResponse.body.data.priceUpdatedAt) + 1_000).toISOString();
+    const priceResponse = await request(app)
+      .post("/api/assets/asset-btc/price")
+      .send({
+        price: "70000.125",
+        currency: "USD",
+        source: "manual-test",
+        asOf,
+      })
+      .expect(200);
+
+    expect(priceResponse.body.data).toMatchObject({
+      id: "asset-btc",
+      currentPrice: "70000.125",
+      marketValue: "8750.015625",
+      priceSource: "manual-test",
+      priceUpdatedAt: asOf,
+    });
+
+    const historyResponse = await request(app)
+      .get("/api/assets/asset-btc/price")
+      .expect(200);
+    expect(historyResponse.body.data).toHaveLength(2);
+    expect(historyResponse.body.data[0]).toMatchObject({
+      price: "70000.125",
+      source: "manual-test",
+      asOf,
+    });
+  });
+
+  it("updates an expected asset status and keeps AI research as an audited update", async () => {
+    await request(app)
+      .post("/api/expected")
+      .send({
+        id: "expected-airdrop",
+        name: "Protocol Airdrop",
+        category: "airdrop",
+        ecosystem: "Ethereum",
+        stage: "watching",
+        health: "due",
+        nextAction: "Check the official claim page",
+        estimatedLow: "100",
+        estimatedHigh: "600",
+        currency: "USD",
+        investedCost: "12.5",
+        confidence: "medium",
+        sourceUrl: "https://example.com/airdrop",
+        keywords: ["claim", "eligibility"],
+      })
+      .expect(201);
+
+    const updateResponse = await request(app)
+      .patch("/api/expected/expected-airdrop")
+      .send({
+        stage: "claimable",
+        health: "healthy",
+        latestUpdate: "The claim window is open.",
+      })
+      .expect(200);
+
+    expect(updateResponse.body.data).toMatchObject({
+      id: "expected-airdrop",
+      stage: "claimable",
+      health: "healthy",
+      latestUpdate: "The claim window is open.",
+    });
+
+    const checkResponse = await request(app)
+      .post("/api/expected/expected-airdrop/check")
+      .send({})
+      .expect(200);
+    expect(checkResponse.body.data.run).toMatchObject({
+      status: "success",
+      provider: "mock",
+      emailStatus: "skipped",
+    });
+    expect(checkResponse.body.data.expected).toMatchObject({
+      stage: "claimable",
+      health: "healthy",
+    });
+
+    const updatesResponse = await request(app)
+      .get("/api/expected/expected-airdrop/updates")
+      .expect(200);
+    expect(updatesResponse.body.data).toHaveLength(1);
+    expect(updatesResponse.body.data[0]).toMatchObject({
+      expectedAssetId: "expected-airdrop",
+      type: "research",
+      provider: "mock",
+    });
+
+    const runsResponse = await request(app)
+      .get("/api/expected/expected-airdrop/runs")
+      .expect(200);
+    expect(runsResponse.body.data).toHaveLength(1);
+    expect(runsResponse.body.data[0]).toMatchObject({
+      id: checkResponse.body.data.run.id,
+      eventId: "expected-airdrop",
+      status: "success",
+      provider: "mock",
+    });
+  });
+
+  it("creates an event and runs it immediately through the injected AI provider", async () => {
+    const createResponse = await request(app)
+      .post("/api/events")
+      .send({
+        id: "event-policy",
+        name: "Policy watch",
+        topic: "Digital asset regulation",
+        instructions: "Report material changes and cite primary sources.",
+        schedule: "0 9 * * 1",
+        scheduleLabel: "Every Monday at 09:00",
+        timezone: "Asia/Shanghai",
+        status: "active",
+        notifyOnChangeOnly: true,
+        emailEnabled: false,
+        emailTo: "",
+      })
+      .expect(201);
+
+    expect(createResponse.body.data).toMatchObject({
+      id: "event-policy",
+      status: "active",
+      timezone: "Asia/Shanghai",
+    });
+    expect(Date.parse(createResponse.body.data.nextRunAt)).not.toBeNaN();
+
+    const runResponse = await request(app)
+      .post("/api/events/event-policy/run")
+      .send({})
+      .expect(201);
+    expect(runResponse.body.data).toMatchObject({
+      eventId: "event-policy",
+      status: "success",
+      provider: "mock",
+      emailStatus: "skipped",
+    });
+    expect(runResponse.body.data.summary).toContain("Policy watch");
+
+    const runsResponse = await request(app)
+      .get("/api/events/event-policy/runs")
+      .expect(200);
+    expect(runsResponse.body.data).toHaveLength(1);
+    expect(runsResponse.body.data[0].id).toBe(runResponse.body.data.id);
+
+    const invalidEmail = await request(app)
+      .patch("/api/events/event-policy")
+      .send({ emailEnabled: true })
+      .expect(400);
+    expect(invalidEmail.body.error.code).toBe("EMAIL_RECIPIENT_REQUIRED");
+
+    const emailEnabled = await request(app)
+      .patch("/api/events/event-policy")
+      .send({ emailEnabled: true, emailTo: "owner@example.com" })
+      .expect(200);
+    expect(emailEnabled.body.data).toMatchObject({
+      emailEnabled: true,
+      emailTo: "owner@example.com",
+    });
+  });
+});

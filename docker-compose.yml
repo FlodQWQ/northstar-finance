@@ -1,0 +1,44 @@
+name: northstar-finance
+
+services:
+  finance-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: northstar-finance:local
+    restart: unless-stopped
+    stop_grace_period: 20s
+    env_file:
+      - "${FINANCE_ENV_FILE:-.env}"
+    environment:
+      NODE_ENV: production
+      PORT: "5888"
+      HOST: 0.0.0.0
+      DATABASE_PATH: /app/data/finance.sqlite
+      SEED_DEMO_DATA: "${CONTAINER_SEED_DEMO_DATA:-false}"
+      HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${CONTAINER_HTTPS_PROXY:-}"
+      NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1}"
+    ports:
+      - "127.0.0.1:${HOST_PORT:-5888}:5888"
+    volumes:
+      - finance-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  finance-data:
