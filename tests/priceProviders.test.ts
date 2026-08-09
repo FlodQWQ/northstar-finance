@@ -68,6 +68,26 @@ describe("public market price providers", () => {
     expect(calls[0]).toContain("www.okx.com/api/v5/market/ticker");
   });
 
+  it("keeps the account venue ahead of a previous fallback source", async () => {
+    const calls: string[] = [];
+    const provider = new MultiSourcePriceProvider({
+      fetchImpl: vi.fn(async (url: string) => {
+        calls.push(url);
+        return json([{ currency_pair: "ETH_USDT", last: "1921.3" }]);
+      }),
+      cacheTtlMs: 0,
+    });
+
+    const quote = await provider.getQuote(asset({
+      symbol: "ETH",
+      account: "gate",
+      priceSource: "binance:ETHUSDT",
+    }));
+
+    expect(quote.source).toBe("gate:ETH_USDT");
+    expect(calls[0]).toContain("api.gateio.ws");
+  });
+
   it("falls through a blocked venue to another public exchange", async () => {
     const calls: string[] = [];
     const fetchImpl = vi.fn(async (url: string) => {

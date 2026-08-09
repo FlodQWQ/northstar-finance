@@ -115,7 +115,6 @@ interface MarketRequest {
 interface PriceAdapter {
   readonly id: PriceVenue;
   getQuote(request: MarketRequest): Promise<PriceQuote | null>;
-  testConnection(): Promise<PriceQuote | null>;
 }
 
 const DEFAULT_TIMEOUT_MS = 6_000;
@@ -305,6 +304,17 @@ function quoteFromValue(
   return { price, currency, source, asOf: parsedAsOf, raw };
 }
 
+function exchangeRaw(request: MarketRequest, raw: Record<string, unknown>): Record<string, unknown> {
+  return request.quote === request.outputCurrency
+    ? raw
+    : {
+        market: raw,
+        sourceCurrency: request.quote,
+        outputCurrency: request.outputCurrency,
+        approximatePeg: true,
+      };
+}
+
 class JsonHttpClient {
   private readonly fetchImpl: PriceFetch;
   private readonly dispatcher?: Dispatcher;
@@ -337,9 +347,12 @@ class JsonHttpClient {
 
     let response: Response;
     let lastError: unknown;
+    const deadline = Date.now() + timeoutMs;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const timer = setTimeout(() => controller.abort(), remainingMs);
       try {
         response = await this.fetchImpl(url, {
           method: "GET",
@@ -354,7 +367,8 @@ class JsonHttpClient {
           const delay = Number.isFinite(retryAfter) && retryAfter > 0
             ? Math.min(1_000, retryAfter * 1_000)
             : 100;
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          const boundedDelay = Math.min(delay, Math.max(0, deadline - Date.now()));
+          if (boundedDelay > 0) await new Promise((resolve) => setTimeout(resolve, boundedDelay));
           continue;
         }
         if (!response.ok) {
@@ -382,6 +396,9 @@ class JsonHttpClient {
       }
     }
     if (lastError instanceof PriceProviderError) throw lastError;
+    if (Date.now() >= deadline) {
+      throw new PriceProviderError("Price upstream request timed out", "UPSTREAM_TIMEOUT");
+    }
     throw new PriceProviderError("Price upstream request failed", "UPSTREAM_REQUEST_FAILED");
   }
 
@@ -427,36 +444,6 @@ abstract class ExchangeAdapter implements PriceAdapter {
   public constructor(protected readonly http: JsonHttpClient) {}
 
   public abstract getQuote(request: MarketRequest): Promise<PriceQuote | null>;
-
-  public async testConnection(): Promise<PriceQuote | null> {
-    return this.getQuote({
-      base: "BTC",
-      quote: "USDT",
-      outputCurrency: "USDT",
-      asset: {
-        id: "price-provider-test",
-        name: "Bitcoin",
-        symbol: "BTC",
-        kind: "crypto",
-        account: this.id,
-        currency: "USDT",
-        quantity: "0",
-        unitCost: "0",
-        currentPrice: "0",
-        marketValue: "0",
-        costBasis: "0",
-        pnl: "0",
-        pnlPercent: "0",
-        priceMode: "provider",
-        priceSource: this.id,
-        priceUpdatedAt: new Date().toISOString(),
-        staleAfterHours: 24,
-        notes: "",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      },
-    });
-  }
 }
 
 class BinanceAdapter extends ExchangeAdapter {
@@ -473,7 +460,7 @@ class BinanceAdapter extends ExchangeAdapter {
     const bodyObject = body as Record<string, unknown>;
     if (typeof bodyObject.symbol === "string" && bodyObject.symbol !== symbol) return null;
     const value = bodyObject.price;
-    return quoteFromValue(value, `binance:${symbol}`, request.outputCurrency, body);
+    return quoteFromValue(value, `binance:${symbol}`, request.outputCurrency, exchangeRaw(request, bodyObject));
   }
 }
 
@@ -494,7 +481,14 @@ class OkxAdapter extends ExchangeAdapter {
     const row = Array.isArray(rows) ? rows[0] : undefined;
     if (!row || typeof row !== "object") return null;
     const value = (row as Record<string, unknown>).last;
-    return quoteFromValue(value, `okx:${instId}`, request.outputCurrency, row, (row as Record<string, unknown>).ts);
+    const rowObject = row as Record<string, unknown>;
+    return quoteFromValue(
+      value,
+      `okx:${instId}`,
+      request.outputCurrency,
+      exchangeRaw(request, rowObject),
+      rowObject.ts,
+    );
   }
 }
 
@@ -515,7 +509,13 @@ class BitgetAdapter extends ExchangeAdapter {
     const row = Array.isArray(rows) ? rows[0] : undefined;
     if (!row || typeof row !== "object") return null;
     const value = (row as Record<string, unknown>).lastPr;
-    return quoteFromValue(value, `bitget:${symbol}`, request.outputCurrency, row, bodyObject.requestTime);
+    return quoteFromValue(
+      value,
+      `bitget:${symbol}`,
+      request.outputCurrency,
+      exchangeRaw(request, row as Record<string, unknown>),
+      bodyObject.requestTime,
+    );
   }
 }
 
@@ -539,7 +539,13 @@ class BybitAdapter extends ExchangeAdapter {
     const row = Array.isArray(rows) ? rows[0] : undefined;
     if (!row || typeof row !== "object") return null;
     const value = (row as Record<string, unknown>).lastPrice;
-    return quoteFromValue(value, `bybit:${symbol}`, request.outputCurrency, row, bodyObject.time);
+    return quoteFromValue(
+      value,
+      `bybit:${symbol}`,
+      request.outputCurrency,
+      exchangeRaw(request, row as Record<string, unknown>),
+      bodyObject.time,
+    );
   }
 }
 
@@ -558,7 +564,13 @@ class GateAdapter extends ExchangeAdapter {
     const rowObject = row as Record<string, unknown>;
     if (typeof rowObject.currency_pair === "string" && rowObject.currency_pair !== pair) return null;
     const value = rowObject.last;
-    return quoteFromValue(value, `gate:${pair}`, request.outputCurrency, row, rowObject.timestamp);
+    return quoteFromValue(
+      value,
+      `gate:${pair}`,
+      request.outputCurrency,
+      exchangeRaw(request, rowObject),
+      rowObject.timestamp,
+    );
   }
 }
 
@@ -601,14 +613,6 @@ class CoinGeckoAdapter implements PriceAdapter {
     );
   }
 
-  public async testConnection(): Promise<PriceQuote | null> {
-    return this.getQuote({
-      base: "BTC",
-      quote: "USD",
-      outputCurrency: "USD",
-      asset: {} as Asset,
-    });
-  }
 }
 
 interface CachedQuote {
@@ -669,6 +673,9 @@ export class MultiSourcePriceProvider implements PriceProvider {
     const base = assetBaseSymbol(asset, this.symbolAliases);
     if (!base) {
       throw new PriceProviderError("Asset has no market symbol", "PRICE_SYMBOL_MISSING", 422);
+    }
+    if (base.length > 40) {
+      throw new PriceProviderError("Asset market symbol is too long", "PRICE_SYMBOL_INVALID", 422);
     }
     const outputCurrency = normalizeCurrency(asset.currency);
     if (!outputCurrency) {
@@ -736,34 +743,46 @@ export class MultiSourcePriceProvider implements PriceProvider {
   }
 
   public async testConnection(): Promise<ConnectionTestResult> {
-    const errors: string[] = [];
-    for (const venue of this.orderedVenues({ account: "", priceSource: "" } as Asset)) {
-      const adapter = this.adapters.get(venue);
-      if (!adapter) continue;
-      try {
-        const quote = await adapter.testConnection();
-        if (quote) {
-          return {
-            ok: true,
-            status: "connected",
-            message: `Public market data is reachable via ${venue}.`,
-          };
-        }
-      } catch (error) {
-        errors.push(`${venue}:${error instanceof Error ? error.message : "request failed"}`);
-      }
+    const now = new Date().toISOString();
+    try {
+      const quote = await this.getQuote({
+        id: "price-provider-test",
+        name: "Bitcoin",
+        symbol: "BTC",
+        kind: "crypto",
+        account: this.preferredVenue ?? "",
+        currency: "USDT",
+        quantity: "0",
+        unitCost: "0",
+        currentPrice: "0",
+        marketValue: "0",
+        costBasis: "0",
+        pnl: "0",
+        pnlPercent: "0",
+        priceMode: "provider",
+        priceSource: this.preferredVenue ?? "multi",
+        priceUpdatedAt: now,
+        staleAfterHours: 24,
+        notes: "",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return {
+        ok: true,
+        status: "connected",
+        message: `Public market data is reachable via ${quote.source.split(":", 1)[0]}.`,
+      };
+    } catch {
+      return {
+        ok: false,
+        status: "failed",
+        message: "No configured public market-data source responded.",
+      };
     }
-    return {
-      ok: false,
-      status: "failed",
-      message: errors.length > 0
-        ? "No configured public market-data source responded."
-        : "No public market-data source is configured.",
-    };
   }
 
   private orderedVenues(asset: Asset): PriceVenue[] {
-    const hinted = venueFromText(`${asset.account ?? ""} ${asset.priceSource ?? ""}`);
+    const hinted = venueFromText(asset.account ?? "") ?? venueFromText(asset.priceSource ?? "");
     const first = hinted ?? this.preferredVenue;
     const all: PriceVenue[] = ["binance", "okx", "bitget", "bybit", "gate", "coingecko"];
     if (!first) return all;
