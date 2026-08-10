@@ -17,6 +17,7 @@ import {
 import { useMemo, useState, type FormEvent } from "react";
 import type { AssetKind, ExpectedAsset, ExpectedHealth, ExpectedStage } from "../../shared/types";
 import { api, type ExpectedConversionInput, type ExpectedInput } from "../api";
+import { AssetIcon } from "../components/AssetIcon";
 import { MonitorRunTimeline } from "../components/MonitorRunTimeline";
 import { useResource } from "../hooks";
 import {
@@ -513,7 +514,7 @@ export default function ExpectedPage() {
                   <tr className="event-row" key={item.id} onClick={() => setSelectedItem(item)}>
                     <td>
                       <button className="event-open-button" type="button" onClick={() => setSelectedItem(item)} aria-label={`查看预期资产 ${item.name}`}>
-                        <span className="asset-cell"><span className="asset-avatar expected-avatar">{item.name.slice(0, 2)}</span><span><strong>{item.name}</strong><small>{item.ecosystem || item.category} · 信心{confidenceLabels[item.confidence]}</small></span></span>
+                        <span className="asset-cell"><AssetIcon className="expected-avatar" name={item.name} /><span><strong>{item.name}</strong><small>{item.ecosystem || item.category} · 信心{confidenceLabels[item.confidence]}</small></span></span>
                       </button>
                     </td>
                     <td><StatusBadge label={expectedStageLabels[item.stage]} tone={getTone(item.stage)} /></td>
@@ -530,7 +531,7 @@ export default function ExpectedPage() {
             <div className="mobile-data-list">
               {filtered.map((item) => (
                 <article className="mobile-data-item event-card" key={item.id} onClick={() => setSelectedItem(item)}>
-                  <header><button className="event-open-button event-mobile-trigger" type="button" onClick={() => setSelectedItem(item)} aria-label={`查看预期资产 ${item.name}`}><span className="asset-cell"><span className="asset-avatar expected-avatar">{item.name.slice(0, 2)}</span><span><strong>{item.name}</strong><small>{item.ecosystem || item.category}</small></span></span></button><StatusBadge label={expectedHealthLabels[item.health]} tone={getTone(item.health)} /></header>
+                  <header><button className="event-open-button event-mobile-trigger" type="button" onClick={() => setSelectedItem(item)} aria-label={`查看预期资产 ${item.name}`}><span className="asset-cell"><AssetIcon className="expected-avatar" name={item.name} /><span><strong>{item.name}</strong><small>{item.ecosystem || item.category}</small></span></span></button><StatusBadge label={expectedHealthLabels[item.health]} tone={getTone(item.health)} /></header>
                   <div className="mobile-value-row"><div><small>阶段</small><strong>{expectedStageLabels[item.stage]}</strong></div><div><small>价值区间</small><strong>{formatMoney(item.estimatedLow, item.currency)} - {formatMoney(item.estimatedHigh, item.currency)}</strong></div></div>
                   <div className="next-action"><small>下一步</small><strong>{item.nextAction || "等待更新"}</strong><span><CalendarDays size={15} /> {formatDate(item.deadline)}</span></div>
                   <footer><Button className="secondary" type="button" onClick={(clickEvent) => { clickEvent.stopPropagation(); setEditing(item); }}><PencilLine size={16} /> 更新状态</Button>{["claimable", "claimed"].includes(item.stage) && !item.linkedAssetId ? <Button className="primary" type="button" onClick={(clickEvent) => { clickEvent.stopPropagation(); setConverting(item); }}><ArrowRightLeft size={16} /> 确认到账</Button> : <Button className="secondary" type="button" onClick={(clickEvent) => { clickEvent.stopPropagation(); void checkItem(item); }} disabled={checkingId === item.id}>{checkingId === item.id ? <RefreshCw className="spin" size={16} /> : <Bot size={16} />} 立即检查</Button>}</footer>

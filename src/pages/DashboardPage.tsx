@@ -22,6 +22,7 @@ import {
 } from "recharts";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { AssetIcon } from "../components/AssetIcon";
 import { useResource } from "../hooks";
 import {
   assetKindLabels,
@@ -180,12 +181,13 @@ export default function DashboardPage() {
                 <div className="compact-list">
                   {data.recentOperations.slice(0, 6).map((operation, index) => {
                     const title = stringFromUnknown(operation.assetName || operation.name, "资产操作");
+                    const symbol = stringFromUnknown(operation.assetSymbol);
                     const type = stringFromUnknown(operation.type, "记录");
                     const happenedAt = stringFromUnknown(operation.occurredAt || operation.createdAt);
                     const quantity = stringFromUnknown(operation.quantity || operation.quantityDelta);
                     return (
                       <div className="compact-row" key={stringFromUnknown(operation.id, String(index))}>
-                        <span className="row-symbol"><Coins size={17} /></span>
+                        <AssetIcon name={title} symbol={symbol} currency={stringFromUnknown(operation.currency)} size="compact" />
                         <span><strong>{title}</strong><small>{type}{quantity ? ` · ${quantity}` : ""}</small></span>
                         <time>{formatDateTime(happenedAt)}</time>
                       </div>

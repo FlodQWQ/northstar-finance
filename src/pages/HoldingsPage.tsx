@@ -14,6 +14,7 @@ import {
 import { useMemo, useState, type FormEvent } from "react";
 import type { Asset, AssetKind, OperationType, PriceMode } from "../../shared/types";
 import { api, type AssetInput } from "../api";
+import { AssetIcon } from "../components/AssetIcon";
 import { useResource } from "../hooks";
 import { assetKindLabels, formatDateTime, formatMoney, formatNumber, toLocalInputValue } from "../utils";
 import {
@@ -411,7 +412,7 @@ export default function HoldingsPage() {
                     const stale = isAssetStale(asset);
                     return (
                       <tr key={asset.id}>
-                        <td><div className="asset-cell"><span className="asset-avatar">{asset.symbol.slice(0, 2)}</span><span><strong>{asset.name}</strong><small>{asset.symbol} · {assetKindLabels[asset.kind]}</small></span></div></td>
+                        <td><div className="asset-cell"><AssetIcon symbol={asset.symbol} name={asset.name} currency={asset.currency} /><span><strong>{asset.name}</strong><small>{asset.symbol} · {assetKindLabels[asset.kind]}</small></span></div></td>
                         <td><strong className="cell-primary">{asset.account}</strong><small className="cell-secondary">{asset.currency}</small></td>
                         <td className="numeric"><strong>{formatNumber(asset.quantity)}</strong></td>
                         <td className="numeric"><strong>{formatMoney(asset.currentPrice, asset.currency)}</strong></td>
@@ -434,7 +435,7 @@ export default function HoldingsPage() {
                 const stale = isAssetStale(asset);
                 return (
                   <article className="mobile-data-item" key={asset.id}>
-                    <header><div className="asset-cell"><span className="asset-avatar">{asset.symbol.slice(0, 2)}</span><span><strong>{asset.name}</strong><small>{asset.account} · {assetKindLabels[asset.kind]}</small></span></div><StatusBadge label={stale ? "待更新" : "最新"} tone={stale ? "warning" : "positive"} /></header>
+                    <header><div className="asset-cell"><AssetIcon symbol={asset.symbol} name={asset.name} currency={asset.currency} /><span><strong>{asset.name}</strong><small>{asset.account} · {assetKindLabels[asset.kind]}</small></span></div><StatusBadge label={stale ? "待更新" : "最新"} tone={stale ? "warning" : "positive"} /></header>
                     <div className="mobile-value-row"><div><small>市值</small><strong>{formatMoney(asset.marketValue, asset.currency)}</strong></div><div><small>盈亏</small><strong className={Number(asset.pnl) >= 0 ? "positive-text" : "danger-text"}>{Number(asset.pnl) >= 0 ? "+" : ""}{formatMoney(asset.pnl, asset.currency)}</strong></div></div>
                     <div className="mobile-meta"><span>{formatNumber(asset.quantity)} {asset.symbol}</span><span>价格 {formatDateTime(asset.priceUpdatedAt)}</span></div>
                     <footer><Button className="secondary" type="button" onClick={() => setOperationAsset(asset)}><PencilLine size={16} /> 记操作</Button><Button className="secondary" type="button" onClick={() => setPriceAsset(asset)}><RefreshCw size={16} /> 改价格</Button></footer>

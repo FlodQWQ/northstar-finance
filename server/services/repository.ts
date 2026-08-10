@@ -927,7 +927,7 @@ export class FinanceRepository {
     }
 
     const recentOperations = this.db.prepare(`
-      SELECT o.id, o.asset_id AS assetId, a.name AS assetName,
+      SELECT o.id, o.asset_id AS assetId, a.name AS assetName, a.symbol AS assetSymbol,
              o.operation_type AS type, o.quantity_delta AS quantityDelta,
              o.unit_price AS unitPrice, o.fee, o.currency, o.note,
              o.occurred_at AS occurredAt
