@@ -253,6 +253,7 @@ describe("AI atomic command API", () => {
       username: "ai-owner",
       password: "correct horse battery staple",
     });
+    guarded.finance.db.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(user.id);
     const apiToken = guarded.finance.authService.createApiToken(user.id, {
       name: "Test agent",
       scopes: ["ai:read", "finance:write", "expected:write"],

@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  CheckCircle2,
   Compass,
   Eye,
   EyeOff,
@@ -15,6 +16,7 @@ import {
 import {
   ApiError,
   type LoginInput,
+  type RegistrationSubmission,
   type RegisterInput,
 } from "../api";
 
@@ -81,6 +83,10 @@ function apiErrorDetails(error: unknown, mode: AuthMode): {
   switch (error.code) {
     case "INVALID_CREDENTIALS":
       return { general: "用户名或密码不正确" };
+    case "ACCOUNT_PENDING":
+      return { general: "注册申请正在等待管理员审批，批准后即可登录" };
+    case "ACCOUNT_DISABLED":
+      return { general: "该账户已停用，请联系管理员" };
     case "INVALID_USERNAME":
       return { fields: { username: "用户名格式不符合要求" } };
     case "USERNAME_TAKEN":
@@ -153,7 +159,7 @@ export function AuthUnavailableScreen({
 export default function AuthScreen({
   onSubmit,
 }: {
-  onSubmit: (mode: AuthMode, input: LoginInput | RegisterInput) => Promise<void>;
+  onSubmit: (mode: AuthMode, input: LoginInput | RegisterInput) => Promise<RegistrationSubmission | void>;
 }) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [values, setValues] = useState<AuthValues>({
@@ -166,6 +172,7 @@ export default function AuthScreen({
   const [submitted, setSubmitted] = useState(false);
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const [generalError, setGeneralError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const identifierRef = useRef<HTMLInputElement>(null);
@@ -192,6 +199,7 @@ export default function AuthScreen({
     setSubmitted(false);
     setServerErrors({});
     setGeneralError("");
+    setSuccessMessage("");
     setShowPassword(false);
   };
 
@@ -213,6 +221,7 @@ export default function AuthScreen({
     event.preventDefault();
     setSubmitted(true);
     setGeneralError("");
+    setSuccessMessage("");
     setServerErrors({});
     if (Object.keys(clientErrors).length > 0) {
       focusFirstError(clientErrors);
@@ -231,7 +240,21 @@ export default function AuthScreen({
 
     setSubmitting(true);
     try {
-      await onSubmit(mode, input);
+      const result = await onSubmit(mode, input);
+      if (mode === "register" && result?.approvalRequired) {
+        setValues({
+          identifier: result.user.username,
+          username: "",
+          email: "",
+          password: "",
+        });
+        setMode("login");
+        setTouched({});
+        setSubmitted(false);
+        setShowPassword(false);
+        setSuccessMessage("申请已提交，等待管理员审批");
+        window.requestAnimationFrame(() => identifierRef.current?.focus());
+      }
     } catch (error) {
       const details = apiErrorDetails(error, mode);
       if (details.fields) {
@@ -252,7 +275,7 @@ export default function AuthScreen({
         <Brand />
         <header className="auth-heading">
           <h1 id="auth-title">{mode === "login" ? "登录账户" : "创建账户"}</h1>
-          <p>{mode === "login" ? "继续进入你的个人资产工作台" : "建立独立账户并开始管理资产"}</p>
+          <p>{mode === "login" ? "继续进入你的个人资产工作台" : "提交申请后，由管理员审核账户"}</p>
         </header>
 
         <div className="auth-segments" role="tablist" aria-label="认证方式">
@@ -279,6 +302,13 @@ export default function AuthScreen({
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit} noValidate>
+          {successMessage ? (
+            <div className="auth-form-success" role="status" aria-live="polite">
+              <CheckCircle2 size={16} />
+              <span>{successMessage}</span>
+            </div>
+          ) : null}
+
           {mode === "login" ? (
             <label className="auth-field" htmlFor="auth-identifier">
               <span>用户名或邮箱</span>
@@ -394,7 +424,7 @@ export default function AuthScreen({
 
           <button className="button primary auth-submit" type="submit" disabled={submitting}>
             {submitting ? <LoaderCircle className="spin" size={18} /> : null}
-            {submitting ? (mode === "login" ? "正在登录" : "正在注册") : (mode === "login" ? "登录" : "创建账户")}
+            {submitting ? (mode === "login" ? "正在登录" : "正在提交") : (mode === "login" ? "登录" : "提交注册申请")}
           </button>
         </form>
       </section>

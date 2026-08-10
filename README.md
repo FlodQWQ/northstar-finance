@@ -33,7 +33,7 @@ npm run build
 npm run start
 ```
 
-首次打开页面后在应用内注册账户。生产模式下由单个 Express 进程在 `PORT=5888` 同源提供 API 与 `dist/` 静态文件。
+全新数据库首次运行前，应在 `.env` 中暂时设置 `APP_AUTH_USERNAME` 和 `APP_AUTH_PASSWORD` 创建首个 owner；确认登录后即可删除这两个明文值。后续用户从页面提交注册申请，由 owner 在“设置 -> 账号审批”中批准。生产模式下由单个 Express 进程在 `PORT=5888` 同源提供 API 与 `dist/` 静态文件。
 
 ## 环境变量
 
@@ -51,8 +51,8 @@ npm run start
 | `DATABASE_PATH` | `./data/finance.sqlite` | SQLite 文件路径；容器内为 `/app/data/finance.sqlite` |
 | `SEED_DEMO_DATA` | 开发为 `true`，生产为 `false` | 是否在空数据库中写入演示资产与事件 |
 | `APP_BASE_URL` | `http://127.0.0.1:5888` | 会话 Cookie Path、同源校验、AI capabilities 与未来邮件链接使用的公开地址 |
-| `REGISTRATION_MODE` | 开发为 `open`，生产为 `closed` | `open` 允许页面注册新账户；`closed` 仅允许已有账户登录 |
-| `APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD` | 空 | 新生产库的一次性 owner 启动账号；迁移 v1 数据库时也用它接管旧数据 |
+| `REGISTRATION_MODE` | 开发为 `open`，生产为 `closed` | `open` 允许提交待 owner 审批的注册申请；`closed` 仅允许已有账户登录 |
+| `APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD` | 空 | 全新数据库的一次性 owner 启动账号；迁移 v1 数据库时也用它接管旧数据 |
 | `SCHEDULER_ENABLED` | `true` | 是否启动持久化事件调度器 |
 | `SCHEDULER_POLL_MS` | `30000` | 扫描到期事件的间隔，单位毫秒 |
 | `SCHEDULER_LEASE_MS` | `600000` | 单次调度任务的数据库租约时长，单位毫秒 |
@@ -83,7 +83,7 @@ npm run start
 
 每个资产、流水、价格、预期资产、事件、运行记录、邮件 outbox、设置和 AI 审计行都绑定不可变的 `owner_id`。仓储查询不会接受客户端提交的 owner，跨账户资源访问统一返回 `404`。调度器、邮件与 AI 命令同样按 owner 执行。
 
-生产环境未配置 `REGISTRATION_MODE` 时默认关闭注册。首次部署应先设置一次性的 `APP_AUTH_USERNAME` 和 `APP_AUTH_PASSWORD` 创建 owner，确认登录后从环境中删除这两个明文值，再按需将 `REGISTRATION_MODE` 改为 `open`。后续页面注册的账户都是普通成员，不会因注册顺序取得全局 owner 权限。静态登录页面、`/api/health` 和认证接口公开，普通业务 API 必须使用 Session。登录按客户端 IP 和规范化账户双重限流，其中账户失败计数保存在 SQLite，不能通过切换 IP 或重启服务绕过。
+生产环境未配置 `REGISTRATION_MODE` 时默认关闭注册。首次部署应先设置一次性的 `APP_AUTH_USERNAME` 和 `APP_AUTH_PASSWORD` 创建 owner，确认登录后从环境中删除这两个明文值，再按需将 `REGISTRATION_MODE` 改为 `open`。页面注册只会创建 `pending` 普通成员，不会下发 Session；owner 可通过 `GET /api/admin/registrations` 查看申请，并通过对应的 `approve` 或 `reject` 接口处理。批准后账户才能登录，且不会因注册顺序取得全局 owner 权限。管理接口沿用 Session、精确 Origin 和 CSRF 防护。静态登录页面、`/api/health` 和认证接口公开，普通业务 API 必须使用 Session。登录按客户端 IP 和规范化账户双重限流，其中账户失败计数保存在 SQLite，不能通过切换 IP 或重启服务绕过。
 
 AI 路由只接受账户级 Bearer token，不接受页面 Session；Bearer token 也不能访问普通业务 API。
 

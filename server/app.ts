@@ -388,10 +388,11 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
       username: request.body?.username,
       email: request.body?.email,
       password: request.body?.password,
-    });
-    const created = authService.createSession(user.id, sessionMetadata(request));
-    setSessionCookie(response, created);
-    response.status(201).json(data(sessionPayload(created), "Account created"));
+    }, { requireApproval: true });
+    response.status(202).json(data({
+      approvalRequired: true as const,
+      user,
+    }, "Registration submitted for approval"));
   }));
 
   app.post("/api/auth/login", asyncRoute(async (request, response) => {
@@ -502,6 +503,32 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
       session: authenticated,
     });
     next();
+  });
+
+  const ownerId = (response: Response): string => {
+    const authenticated = services(response).session;
+    if (!authenticated) throw new AuthError("Sign in is required", 401, "UNAUTHENTICATED");
+    return authenticated.user.id;
+  };
+
+  app.get("/api/admin/registrations", (_request, response) => {
+    response.json(data(authService.listPendingRegistrations(ownerId(response))));
+  });
+
+  app.post("/api/admin/registrations/:id/approve", (request, response) => {
+    const id = parse(entityId, request.params.id);
+    response.json(data(
+      authService.approveRegistration(ownerId(response), id),
+      "Registration approved",
+    ));
+  });
+
+  app.post("/api/admin/registrations/:id/reject", (request, response) => {
+    const id = parse(entityId, request.params.id);
+    response.json(data(
+      authService.rejectRegistration(ownerId(response), id),
+      "Registration rejected",
+    ));
   });
 
   app.get("/api/account/api-tokens", (_request, response) => {

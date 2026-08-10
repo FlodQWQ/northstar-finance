@@ -14,8 +14,15 @@ const temporaryDirectories: string[] = [];
 interface SignedInAccount {
   cookie: string;
   csrfToken: string;
-  user: { id: string; username: string; role: "owner" | "user" };
+  user: {
+    id: string;
+    username: string;
+    status: "pending" | "active" | "disabled";
+    role: "owner" | "user";
+  };
 }
+
+const testOwners = new WeakMap<FinanceApp, Promise<SignedInAccount>>();
 
 function createProtectedApp(options: Parameters<typeof createApp>[0] = {}): FinanceApp {
   const app = createApp({
@@ -41,12 +48,49 @@ async function register(app: FinanceApp, username: string): Promise<SignedInAcco
     .post("/api/auth/register")
     .set("Origin", origin)
     .send({ username, password })
-    .expect(201);
+    .expect(202);
+  const owner = await testOwner(app);
+  await authenticated(
+    app,
+    owner,
+    "post",
+    `/api/admin/registrations/${response.body.data.user.id}/approve`,
+  ).expect(200);
+  const login = await request(app)
+    .post("/api/auth/login")
+    .set("Origin", origin)
+    .send({ identifier: username, password })
+    .expect(200);
   return {
-    cookie: cookieFrom(response),
-    csrfToken: response.body.data.csrfToken,
-    user: response.body.data.user,
+    cookie: cookieFrom(login),
+    csrfToken: login.body.data.csrfToken,
+    user: login.body.data.user,
   };
+}
+
+function testOwner(app: FinanceApp): Promise<SignedInAccount> {
+  const existing = testOwners.get(app);
+  if (existing) return existing;
+  const created = (async () => {
+    const user = await app.finance.authService.register({
+      username: "test-approval-owner",
+      password,
+    });
+    app.finance.db.prepare(`
+      UPDATE users SET status = 'active', role = 'owner' WHERE id = ?
+    `).run(user.id);
+    const session = app.finance.authService.createSession(user.id, {
+      userAgent: "vitest owner fixture",
+      ip: "127.0.0.1",
+    });
+    return {
+      cookie: app.finance.authService.serializeSessionCookie(session).split(";", 1)[0] ?? "",
+      csrfToken: session.session.csrfToken,
+      user: session.user,
+    };
+  })();
+  testOwners.set(app, created);
+  return created;
 }
 
 function authenticated(
@@ -92,25 +136,63 @@ describe("application authentication", () => {
     expect(dashboard.body.error.code).toBe("UNAUTHENTICATED");
   });
 
-  it("registers, logs in, restores the session, and logs out with an HttpOnly cookie", async () => {
+  it("holds registration for owner approval before allowing login", async () => {
     const app = createProtectedApp();
-    const account = await register(app, "northstar");
+    const registration = await request(app)
+      .post("/api/auth/register")
+      .set("Origin", origin)
+      .send({ username: "northstar", password })
+      .expect(202);
+    expect(registration.headers["set-cookie"]).toBeUndefined();
+    expect(registration.body.data).toMatchObject({
+      approvalRequired: true,
+      user: { username: "northstar", status: "pending", role: "user" },
+    });
 
-    const registeredCookie = (await request(app)
+    const pendingLogin = await request(app)
       .post("/api/auth/login")
       .set("Origin", origin)
       .send({ identifier: "northstar", password })
-      .expect(200)).headers["set-cookie"] as unknown as string[];
+      .expect(403);
+    expect(pendingLogin.body.error.code).toBe("ACCOUNT_PENDING");
+
+    const owner = await testOwner(app);
+    const pending = await authenticated(app, owner, "get", "/api/admin/registrations").expect(200);
+    expect(pending.body.data).toEqual([
+      expect.objectContaining({ id: registration.body.data.user.id, username: "northstar" }),
+    ]);
+    await authenticated(
+      app,
+      owner,
+      "post",
+      `/api/admin/registrations/${registration.body.data.user.id}/approve`,
+    ).expect(200);
+
+    const login = await request(app)
+      .post("/api/auth/login")
+      .set("Origin", origin)
+      .send({ identifier: "northstar", password })
+      .expect(200);
+    const registeredCookie = login.headers["set-cookie"] as unknown as string[];
     expect(registeredCookie[0]).toContain("HttpOnly");
     expect(registeredCookie[0]).toContain("SameSite=Lax");
     expect(registeredCookie[0]).toContain("Path=/northstar");
     expect(registeredCookie[0]).not.toContain("Secure");
 
+    const account: SignedInAccount = {
+      cookie: cookieFrom(login),
+      csrfToken: login.body.data.csrfToken,
+      user: login.body.data.user,
+    };
     const session = await request(app)
       .get("/api/auth/session")
       .set("Cookie", account.cookie)
       .expect(200);
-    expect(session.body.data.user).toMatchObject({ username: "northstar", role: "owner" });
+    expect(session.body.data.user).toMatchObject({
+      username: "northstar",
+      status: "active",
+      role: "user",
+    });
     expect(session.body.data.csrfToken).toBe(account.csrfToken);
 
     const logout = await authenticated(app, account, "post", "/api/auth/logout").expect(200);
@@ -121,6 +203,47 @@ describe("application authentication", () => {
       .set("Cookie", account.cookie)
       .expect(200);
     expect(signedOut.body.data.authenticated).toBe(false);
+  });
+
+  it("allows only owners with valid mutation defenses to decide pending registrations", async () => {
+    const app = createProtectedApp();
+    const first = await request(app).post("/api/auth/register").set("Origin", origin)
+      .send({ username: "pending-first", password }).expect(202);
+    const second = await request(app).post("/api/auth/register").set("Origin", origin)
+      .send({ username: "pending-second", password }).expect(202);
+    const owner = await testOwner(app);
+    const regular = await register(app, "regular-user");
+    const firstPath = `/api/admin/registrations/${first.body.data.user.id}/approve`;
+    const secondRejectPath = `/api/admin/registrations/${second.body.data.user.id}/reject`;
+
+    await request(app).get("/api/admin/registrations").expect(401);
+    const denied = await authenticated(app, regular, "get", "/api/admin/registrations").expect(403);
+    expect(denied.body.error.code).toBe("OWNER_REQUIRED");
+    await request(app).post(firstPath)
+      .set("Cookie", owner.cookie)
+      .set("X-CSRF-Token", owner.csrfToken)
+      .expect(403);
+    await request(app).post(firstPath)
+      .set("Cookie", owner.cookie)
+      .set("Origin", origin)
+      .expect(403);
+
+    const approved = await authenticated(app, owner, "post", firstPath).expect(200);
+    expect(approved.body.data).toMatchObject({ status: "active", role: "user" });
+    const repeated = await authenticated(app, owner, "post", firstPath).expect(409);
+    expect(repeated.body.error.code).toBe("REGISTRATION_NOT_PENDING");
+
+    const rejected = await authenticated(app, owner, "post", secondRejectPath).expect(200);
+    expect(rejected.body.data).toMatchObject({ status: "disabled", role: "user" });
+    const rejectedApproval = await authenticated(
+      app,
+      owner,
+      "post",
+      `/api/admin/registrations/${second.body.data.user.id}/approve`,
+    ).expect(409);
+    expect(rejectedApproval.body.error.code).toBe("REGISTRATION_NOT_PENDING");
+    expect((await authenticated(app, owner, "get", "/api/admin/registrations").expect(200)).body.data)
+      .toEqual([]);
   });
 
   it("never promotes a public production registration to deployment owner", async () => {

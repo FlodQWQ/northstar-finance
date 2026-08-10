@@ -50,6 +50,8 @@ describe("PersistentScheduler tenant isolation", () => {
         username: "scheduler-bob",
         password: "correct horse battery staple",
       });
+      db.prepare("UPDATE users SET status = 'active' WHERE id IN (?, ?)")
+        .run(alice.id, bob.id);
       const dueAt = "2026-08-10T00:00:00.000Z";
       const createEvent = (ownerId: string, id: string, name: string) => {
         const repository = new FinanceRepository(db, ownerId);

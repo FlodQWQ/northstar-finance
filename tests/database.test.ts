@@ -1,8 +1,13 @@
+import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { openDatabase, type SqliteDatabase } from "../server/db/database";
+import {
+  DATABASE_SCHEMA_VERSION,
+  openDatabase,
+  type SqliteDatabase,
+} from "../server/db/database";
 
 const temporaryDirectories: string[] = [];
 const openDatabases: SqliteDatabase[] = [];
@@ -134,6 +139,86 @@ describe("openDatabase", () => {
       db.prepare("SELECT value FROM settings WHERE key = 'timezone'").pluck().get(),
     ).toBe("Asia/Shanghai");
     expect(db.prepare("SELECT COUNT(*) FROM assets").pluck().get()).toBe(0);
+  });
+
+  it("atomically migrates the v2 user status constraint without losing accounts or sessions", () => {
+    const { db, path } = createFileDatabase(false);
+    const timestamp = "2026-08-10T00:00:00.000Z";
+    db.prepare(`
+      INSERT INTO users (
+        id, username, username_normalized, email, email_normalized,
+        password_hash, status, role, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'active', 'owner', ?, ?)
+    `).run(
+      "legacy-owner",
+      "LegacyOwner",
+      "legacyowner",
+      "legacy@example.com",
+      "legacy@example.com",
+      "legacy-password-hash",
+      timestamp,
+      timestamp,
+    );
+    db.prepare(`
+      INSERT INTO sessions (
+        id, user_id, token_hash, csrf_token, created_at, last_seen_at,
+        idle_expires_at, absolute_expires_at, revoked_at, user_agent_hash, ip_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+    `).run(
+      "legacy-session",
+      "legacy-owner",
+      "legacy-token-hash",
+      "legacy-csrf",
+      timestamp,
+      timestamp,
+      "2026-08-17T00:00:00.000Z",
+      "2026-09-09T00:00:00.000Z",
+    );
+    db.close();
+
+    const legacy = new Database(path);
+    legacy.pragma("foreign_keys = OFF");
+    legacy.exec(`
+      CREATE TABLE users_v2 (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        username_normalized TEXT NOT NULL UNIQUE,
+        email TEXT,
+        email_normalized TEXT UNIQUE,
+        password_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+        role TEXT NOT NULL CHECK (role IN ('user', 'owner')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO users_v2 SELECT * FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_v2 RENAME TO users;
+      PRAGMA user_version = 2;
+    `);
+    legacy.close();
+
+    const migrated = openDatabase({ path, seed: false });
+    openDatabases.push(migrated);
+    expect(migrated.pragma("user_version", { simple: true })).toBe(DATABASE_SCHEMA_VERSION);
+    expect(migrated.prepare(`
+      SELECT username, email, status, role FROM users WHERE id = 'legacy-owner'
+    `).get()).toEqual({
+      username: "LegacyOwner",
+      email: "legacy@example.com",
+      status: "active",
+      role: "owner",
+    });
+    expect(migrated.prepare("SELECT user_id FROM sessions WHERE id = 'legacy-session'").pluck().get())
+      .toBe("legacy-owner");
+    expect(migrated.pragma("foreign_key_check")).toEqual([]);
+    expect(() => migrated.prepare(`
+      INSERT INTO users (
+        id, username, username_normalized, email, email_normalized,
+        password_hash, status, role, created_at, updated_at
+      ) VALUES ('new-pending', 'NewPending', 'newpending', NULL, NULL,
+                'hash', 'pending', 'user', ?, ?)
+    `).run(timestamp, timestamp)).not.toThrow();
   });
 
   it("does not copy deployment connection values into newly registered account defaults", () => {

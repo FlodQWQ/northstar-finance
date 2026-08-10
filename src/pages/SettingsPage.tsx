@@ -1,20 +1,26 @@
 import {
+  AlertCircle,
   Bot,
+  Check,
   CheckCircle2,
   Database,
   Globe2,
   LoaderCircle,
   Mail,
+  RefreshCw,
   Save,
   Send,
   Settings2,
   ShieldCheck,
+  UserCheck,
+  X,
   Wifi,
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { AppSettings } from "../../shared/types";
 import { api, type AuthUser } from "../api";
 import { useResource } from "../hooks";
+import { formatDateTime } from "../utils";
 import {
   Button,
   ErrorState,
@@ -24,6 +30,146 @@ import {
   StatusBadge,
   useToast,
 } from "../components/ui";
+
+type RegistrationDecision = "approve" | "reject";
+
+function RegistrationApprovalSection() {
+  const {
+    data: registrations,
+    loading,
+    error,
+    reload,
+    setData,
+  } = useResource(api.admin.registrations.list);
+  const [acting, setActing] = useState<{ id: string; decision: RegistrationDecision } | null>(null);
+  const { notify } = useToast();
+
+  const decide = async (registration: AuthUser, decision: RegistrationDecision) => {
+    if (acting) return;
+    if (
+      decision === "reject" &&
+      !window.confirm(`确认拒绝 ${registration.username} 的注册申请？该账户将被停用。`)
+    ) {
+      return;
+    }
+
+    setActing({ id: registration.id, decision });
+    try {
+      const decidedUser = decision === "approve"
+        ? await api.admin.registrations.approve(registration.id)
+        : await api.admin.registrations.reject(registration.id);
+      setData((current) => current?.filter((item) => item.id !== decidedUser.id) ?? current);
+      notify(decision === "approve"
+        ? `已批准 ${decidedUser.username} 的注册申请`
+        : `已拒绝 ${decidedUser.username} 的注册申请`);
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "处理注册申请失败，请稍后重试", "error");
+    } finally {
+      setActing(null);
+    }
+  };
+
+  return (
+    <section className="surface settings-section" id="approvals">
+      <div className="settings-section-heading">
+        <span><UserCheck size={19} /></span>
+        <div>
+          <h2>账号审批</h2>
+          <p>新账户通过审批后才能登录，账户数据仍保持独立。</p>
+        </div>
+        <span className="approval-heading-meta">
+          <StatusBadge
+            label={registrations ? `${registrations.length} 项待处理` : "正在读取"}
+            tone={registrations?.length ? "warning" : "neutral"}
+          />
+          <Button
+            className="icon-only secondary approval-refresh"
+            type="button"
+            title="刷新注册申请"
+            aria-label="刷新注册申请"
+            onClick={() => { void reload(); }}
+            disabled={loading || acting !== null}
+          >
+            <RefreshCw className={loading ? "spin" : ""} size={17} />
+          </Button>
+        </span>
+      </div>
+
+      {loading && !registrations ? (
+        <div className="approval-inline-state" role="status" aria-live="polite">
+          <LoaderCircle className="spin" size={20} />
+          <span>正在读取注册申请</span>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="approval-inline-state approval-load-error" role="alert">
+          <AlertCircle size={20} />
+          <span>
+            <strong>注册申请暂时无法读取</strong>
+            <small>{error}</small>
+          </span>
+          <Button className="secondary" type="button" onClick={() => { void reload(); }} disabled={loading}>
+            <RefreshCw className={loading ? "spin" : ""} size={16} /> 重试
+          </Button>
+        </div>
+      ) : null}
+
+      {registrations && registrations.length === 0 && !error ? (
+        <div className="approval-inline-state approval-empty" role="status">
+          <UserCheck size={22} />
+          <span>
+            <strong>暂无待审批申请</strong>
+            <small>新的注册申请会显示在这里。</small>
+          </span>
+        </div>
+      ) : null}
+
+      {registrations && registrations.length > 0 ? (
+        <ul className="approval-list" aria-label="待审批注册申请" aria-live="polite">
+          {registrations.map((registration) => {
+            const currentAction = acting?.id === registration.id ? acting.decision : null;
+            return (
+              <li className="approval-row" key={registration.id} aria-busy={currentAction !== null}>
+                <span className="approval-avatar" aria-hidden="true">
+                  {registration.username.slice(0, 2).toUpperCase()}
+                </span>
+                <span className="approval-user">
+                  <strong>{registration.username}</strong>
+                  <small>{registration.email || "未填写邮箱"}</small>
+                </span>
+                <span className="approval-meta">
+                  <StatusBadge label="待审批" tone="warning" />
+                  <small>申请于 {formatDateTime(registration.createdAt)}</small>
+                </span>
+                <span className="approval-actions">
+                  <Button
+                    className="secondary approval-reject"
+                    type="button"
+                    onClick={() => { void decide(registration, "reject"); }}
+                    disabled={acting !== null}
+                  >
+                    {currentAction === "reject" ? <LoaderCircle className="spin" size={16} /> : <X size={16} />}
+                    {currentAction === "reject" ? "正在拒绝" : "拒绝"}
+                  </Button>
+                  <Button
+                    className="primary"
+                    type="button"
+                    onClick={() => { void decide(registration, "approve"); }}
+                    disabled={acting !== null}
+                  >
+                    {currentAction === "approve" ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+                    {currentAction === "approve" ? "正在批准" : "批准"}
+                  </Button>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
 
 export default function SettingsPage({ user }: { user: AuthUser }) {
   const { data, loading, error, reload, setData } = useResource(api.settings.get);
@@ -82,7 +228,7 @@ export default function SettingsPage({ user }: { user: AuthUser }) {
       <PageHeader
         eyebrow="系统与连接"
         title="设置"
-        description="管理本位币、联网代理、AI、价格来源和邮件投递。"
+        description="管理账户审批、本位币、联网代理、AI、价格来源和邮件投递。"
         actions={
           <Button className="primary" type="submit" form="settings-form" disabled={!form || saving}>
             {saving ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />} {saving ? "正在保存" : "保存设置"}
@@ -95,8 +241,9 @@ export default function SettingsPage({ user }: { user: AuthUser }) {
 
       {form ? (
         <form id="settings-form" className="settings-layout" onSubmit={save}>
-          <nav className={`settings-nav${user.role === "owner" ? "" : " compact"}`} aria-label="设置分区">
+          <nav className={`settings-nav${user.role === "owner" ? " owner" : " compact"}`} aria-label="设置分区">
             <a href="#general"><Settings2 size={16} /> 常规</a>
+            {user.role === "owner" ? <a href="#approvals"><UserCheck size={16} /> 账号审批</a> : null}
             {user.role === "owner" ? <a href="#network"><Globe2 size={16} /> 网络与价格</a> : null}
             {user.role === "owner" ? <a href="#ai"><Bot size={16} /> AI</a> : null}
             <a href="#email"><Mail size={16} /> 邮件</a>
@@ -124,6 +271,8 @@ export default function SettingsPage({ user }: { user: AuthUser }) {
                 </FormField>
               </div>
             </section>
+
+            {user.role === "owner" ? <RegistrationApprovalSection /> : null}
 
             {user.role === "owner" ? <section className="surface settings-section" id="network">
               <div className="settings-section-heading"><span><Globe2 size={19} /></span><div><h2>网络与价格数据</h2><p>所有联网查询均由服务端发起。</p></div></div>

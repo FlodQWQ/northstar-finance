@@ -21,7 +21,7 @@ const authSchema = `
     email TEXT,
     email_normalized TEXT UNIQUE,
     password_hash TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled')),
     role TEXT NOT NULL CHECK (role IN ('user', 'owner')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -83,6 +83,14 @@ function createService(
   });
 }
 
+function activateUser(
+  db: Database.Database,
+  userId: string,
+  role: "user" | "owner" = "user",
+): void {
+  db.prepare("UPDATE users SET status = 'active', role = ? WHERE id = ?").run(role, userId);
+}
+
 afterEach(() => {
   for (const db of databases.splice(0)) {
     if (db.open) db.close();
@@ -113,7 +121,7 @@ describe("password and identity validation", () => {
 });
 
 describe("AuthService sessions", () => {
-  it("registers isolated identities, assigns the first owner, and rejects duplicates", async () => {
+  it("registers isolated pending users and rejects duplicates", async () => {
     const db = createDatabase();
     db.prepare(`
       INSERT INTO users (
@@ -123,27 +131,76 @@ describe("AuthService sessions", () => {
                 'disabled', 'disabled', 'user', ?, ?)
     `).run("2026-08-10T00:00:00.000Z", "2026-08-10T00:00:00.000Z");
     const service = createService(db);
-    const owner = await service.register({
-      username: "Owner",
+    const first = await service.register({
+      username: "FirstUser",
       email: "owner@example.com",
       password: "correct horse battery staple",
-    });
+    }, { requireApproval: true });
     const member = await service.register({
       username: "Member",
       password: "another sufficiently long password",
-    });
+    }, { requireApproval: true });
 
-    expect(owner).toMatchObject({ username: "Owner", email: "owner@example.com", role: "owner" });
-    expect(member).toMatchObject({ username: "Member", email: null, role: "user" });
+    expect(first).toMatchObject({
+      username: "FirstUser",
+      email: "owner@example.com",
+      status: "pending",
+      role: "user",
+    });
+    expect(member).toMatchObject({ username: "Member", email: null, status: "pending", role: "user" });
+    expect(db.prepare("SELECT COUNT(*) FROM settings").pluck().get()).toBe(0);
     await expect(service.register({
-      username: "owner",
+      username: "firstuser",
       password: "yet another valid password",
-    })).rejects.toMatchObject({ code: "USERNAME_TAKEN", status: 409 });
+    }, { requireApproval: true })).rejects.toMatchObject({ code: "USERNAME_TAKEN", status: 409 });
     await expect(service.register({
       username: "Someone",
       email: "OWNER@EXAMPLE.COM",
       password: "yet another valid password",
-    })).rejects.toMatchObject({ code: "EMAIL_TAKEN", status: 409 });
+    }, { requireApproval: true })).rejects.toMatchObject({ code: "EMAIL_TAKEN", status: 409 });
+  });
+
+  it("allows only active owners to list and decide pending registrations", async () => {
+    const db = createDatabase();
+    const service = createService(db);
+    const owner = await service.register({
+      username: "approval-owner",
+      password: "correct horse battery staple",
+    }, { requireApproval: true });
+    const approved = await service.register({
+      username: "approved-user",
+      password: "another sufficiently long password",
+    }, { requireApproval: true });
+    const rejected = await service.register({
+      username: "rejected-user",
+      password: "yet another valid password",
+    }, { requireApproval: true });
+    activateUser(db, owner.id, "owner");
+
+    expect(() => service.listPendingRegistrations(approved.id)).toThrowError(
+      expect.objectContaining({ code: "OWNER_REQUIRED", status: 403 }),
+    );
+    expect(service.listPendingRegistrations(owner.id).map((user) => user.id)).toEqual([
+      approved.id,
+      rejected.id,
+    ]);
+
+    expect(service.approveRegistration(owner.id, approved.id).status).toBe("active");
+    expect(db.prepare("SELECT COUNT(*) FROM settings WHERE owner_id = ?").pluck().get(approved.id))
+      .toBeGreaterThan(0);
+    expect(() => service.approveRegistration(owner.id, approved.id)).toThrowError(
+      expect.objectContaining({ code: "REGISTRATION_NOT_PENDING", status: 409 }),
+    );
+
+    expect(service.rejectRegistration(owner.id, rejected.id).status).toBe("disabled");
+    expect(db.prepare("SELECT COUNT(*) FROM settings WHERE owner_id = ?").pluck().get(rejected.id))
+      .toBe(0);
+    expect(() => service.approveRegistration(owner.id, rejected.id)).toThrowError(
+      expect.objectContaining({ code: "REGISTRATION_NOT_PENDING", status: 409 }),
+    );
+    expect(() => service.rejectRegistration(owner.id, "missing-registration")).toThrowError(
+      expect.objectContaining({ code: "REGISTRATION_NOT_FOUND", status: 404 }),
+    );
   });
 
   it("logs in by username or email, stores only the token hash, and enforces CSRF", async () => {
@@ -157,6 +214,7 @@ describe("AuthService sessions", () => {
       email: "owner@example.com",
       password: "correct horse battery staple",
     });
+    activateUser(db, user.id);
     const created = await service.login(
       { identifier: "OWNER@EXAMPLE.COM", password: "correct horse battery staple" },
       { userAgent: "vitest", ip: "127.0.0.1" },
@@ -204,7 +262,12 @@ describe("AuthService sessions", () => {
     const user = await service.register({
       username: "alice",
       password: "correct horse battery staple",
-    });
+    }, { requireApproval: true });
+    await expect(service.login({
+      identifier: "alice",
+      password: "correct horse battery staple",
+    })).rejects.toMatchObject({ code: "ACCOUNT_PENDING", status: 403 });
+    activateUser(db, user.id);
     const created = await service.login({
       identifier: "alice",
       password: "correct horse battery staple",
@@ -225,11 +288,13 @@ describe("AuthService sessions", () => {
 
 describe("AuthService API tokens", () => {
   it("creates, scopes, lists, authenticates, and revokes owner-bound tokens", async () => {
-    const service = createService(createDatabase());
+    const db = createDatabase();
+    const service = createService(db);
     const user = await service.register({
       username: "agentowner",
       password: "correct horse battery staple",
     });
+    activateUser(db, user.id, "owner");
     const created = service.createApiToken(user.id, {
       name: "Codex agent",
       scopes: ["finance:write", "ai:read", "finance:write"],

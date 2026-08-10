@@ -122,10 +122,12 @@ function AuthBoundary() {
     mode: AuthMode,
     input: LoginInput | RegisterInput,
   ) => {
-    const nextSession = mode === "login"
-      ? await api.auth.login(input as LoginInput)
-      : await api.auth.register(input as RegisterInput);
-    acceptSession(nextSession);
+    if (mode === "login") {
+      const nextSession = await api.auth.login(input as LoginInput);
+      acceptSession(nextSession);
+      return;
+    }
+    return api.auth.register(input as RegisterInput);
   };
 
   const handleLogout = async () => {

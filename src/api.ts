@@ -25,7 +25,10 @@ export interface AuthUser {
   id: string;
   username: string;
   email: string | null;
+  status: "pending" | "active" | "disabled";
   role: "owner" | "user";
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AuthSessionData {
@@ -47,6 +50,11 @@ export interface RegisterInput {
   username: string;
   email?: string;
   password: string;
+}
+
+export interface RegistrationSubmission {
+  approvalRequired: true;
+  user: AuthUser;
 }
 
 type RequestOptions = Omit<RequestInit, "body"> & {
@@ -187,12 +195,25 @@ export const api = {
         handleUnauthorized: false,
       }),
     register: (input: RegisterInput) =>
-      request<AuthSessionData>("/api/auth/register", {
+      request<RegistrationSubmission>("/api/auth/register", {
         method: "POST",
         body: input,
         handleUnauthorized: false,
       }),
     logout: () => request<{ loggedOut: true }>("/api/auth/logout", { method: "POST" }),
+  },
+  admin: {
+    registrations: {
+      list: () => request<AuthUser[]>("/api/admin/registrations"),
+      approve: (id: string) =>
+        request<AuthUser>(`/api/admin/registrations/${encodeURIComponent(id)}/approve`, {
+          method: "POST",
+        }),
+      reject: (id: string) =>
+        request<AuthUser>(`/api/admin/registrations/${encodeURIComponent(id)}/reject`, {
+          method: "POST",
+        }),
+    },
   },
   dashboard: () => request<DashboardData>("/api/dashboard"),
   assets: {

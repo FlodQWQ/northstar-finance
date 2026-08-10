@@ -21,7 +21,7 @@ export interface BootstrapUserIdentity {
   username: string;
 }
 
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 3;
 export const DEFAULT_OWNER_ID = "00000000-0000-4000-8000-000000000000";
 export const BOOTSTRAP_USER_ID = "00000000-0000-4000-8000-000000000001";
 export const DEFAULT_OWNER_USERNAME = "__northstar_internal_default__";
@@ -187,19 +187,21 @@ function immutableOwnerTrigger(table: string): string {
   `;
 }
 
-const schema = `
-  CREATE TABLE IF NOT EXISTS users (
+const userTableDefinition = `(
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL,
     username_normalized TEXT NOT NULL UNIQUE,
     email TEXT,
     email_normalized TEXT UNIQUE,
     password_hash TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled')),
     role TEXT NOT NULL CHECK (role IN ('user', 'owner')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-  );
+  )`;
+
+const schema = `
+  CREATE TABLE IF NOT EXISTS users ${userTableDefinition};
 
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -814,6 +816,41 @@ function migrateLegacySchema(db: SqliteDatabase): void {
   });
 }
 
+function usersSupportPendingStatus(db: SqliteDatabase): boolean {
+  const row = db.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'
+  `).get() as { sql: string | null } | undefined;
+  return Boolean(row?.sql && /\bpending\b/i.test(row.sql));
+}
+
+function migrateUserStatusSchema(db: SqliteDatabase): void {
+  runAtomically(db, () => {
+    if (!tableExists(db, "users")) {
+      throw new Error("Database migration cannot find the users table");
+    }
+    if (tableExists(db, "users_v3_migration")) {
+      throw new Error("Database migration found an unexpected users_v3_migration table");
+    }
+
+    db.exec(`CREATE TABLE users_v3_migration ${userTableDefinition}`);
+    db.exec(`
+      INSERT INTO users_v3_migration (
+        id, username, username_normalized, email, email_normalized,
+        password_hash, status, role, created_at, updated_at
+      )
+      SELECT
+        id, username, username_normalized, email, email_normalized,
+        password_hash, status, role, created_at, updated_at
+      FROM users
+    `);
+    db.exec("DROP TABLE users");
+    db.exec("ALTER TABLE users_v3_migration RENAME TO users");
+    db.exec(schema);
+    assertForeignKeys(db);
+    db.pragma(`user_version = ${DATABASE_SCHEMA_VERSION}`);
+  });
+}
+
 function initializeSchema(db: SqliteDatabase): void {
   const userVersion = Number(db.pragma("user_version", { simple: true }));
   if (userVersion > DATABASE_SCHEMA_VERSION) {
@@ -824,7 +861,11 @@ function initializeSchema(db: SqliteDatabase): void {
 
   const hasAssets = tableExists(db, "assets");
   const hasOwnerColumns = hasAssets && tableHasColumn(db, "assets", "owner_id");
-  if (userVersion === DATABASE_SCHEMA_VERSION && !hasOwnerColumns) {
+  const hasPendingUserStatus = tableExists(db, "users") && usersSupportPendingStatus(db);
+  if (
+    userVersion === DATABASE_SCHEMA_VERSION &&
+    (!hasOwnerColumns || !hasPendingUserStatus)
+  ) {
     throw new Error("Database schema version is inconsistent with its table definitions");
   }
 
@@ -835,6 +876,8 @@ function initializeSchema(db: SqliteDatabase): void {
       installFreshSchema(db);
     } else if (!hasOwnerColumns) {
       migrateLegacySchema(db);
+    } else if (!hasPendingUserStatus) {
+      migrateUserStatusSchema(db);
     } else {
       installFreshSchema(db);
     }

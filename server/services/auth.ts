@@ -37,7 +37,7 @@ export interface AuthUser {
   id: string;
   username: string;
   email: string | null;
-  status: "active" | "disabled";
+  status: "pending" | "active" | "disabled";
   role: "user" | "owner";
   createdAt: string;
   updatedAt: string;
@@ -101,6 +101,10 @@ export interface AuthServiceOptions {
   now?: () => Date;
 }
 
+export interface RegistrationOptions {
+  requireApproval?: boolean;
+}
+
 export interface CookieSerializeOptions {
   path?: string;
   httpOnly?: boolean;
@@ -117,7 +121,7 @@ type UserRow = {
   email: string | null;
   email_normalized: string | null;
   password_hash: string;
-  status: "active" | "disabled";
+  status: "pending" | "active" | "disabled";
   role: "user" | "owner";
   created_at: string;
   updated_at: string;
@@ -544,7 +548,7 @@ export class AuthService {
     username: unknown;
     email?: unknown;
     password: unknown;
-  }): Promise<AuthUser> {
+  }, options: RegistrationOptions = {}): Promise<AuthUser> {
     const username = validateUsername(input.username);
     const usernameNormalized = username.toLowerCase();
     const email = validateEmail(input.email);
@@ -552,6 +556,7 @@ export class AuthService {
     const passwordHash = await hashPassword(input.password, this.passwordOptions);
     const now = this.now().toISOString();
     const id = randomUUID();
+    const requireApproval = options.requireApproval === true;
 
     try {
       const insert = this.db.transaction(() => {
@@ -559,12 +564,15 @@ export class AuthService {
           SELECT COUNT(*) FROM users
           WHERE NOT (status = 'disabled' AND password_hash = 'disabled')
         `).pluck().get() as number;
-        const role = this.firstUserIsOwner && userCount === 0 ? "owner" : "user";
+        const status = requireApproval ? "pending" : "active";
+        const role = requireApproval
+          ? "user"
+          : this.firstUserIsOwner && userCount === 0 ? "owner" : "user";
         this.db.prepare(`
           INSERT INTO users (
             id, username, username_normalized, email, email_normalized,
             password_hash, status, role, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           id,
           username,
@@ -572,11 +580,12 @@ export class AuthService {
           email,
           emailNormalized,
           passwordHash,
+          status,
           role,
           now,
           now,
         );
-        initializeUserSettings(this.db, id);
+        if (!requireApproval) initializeUserSettings(this.db, id);
       });
       insert();
     } catch (error) {
@@ -596,6 +605,64 @@ export class AuthService {
     const row = this.db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as UserRow | undefined;
     if (!row) throw new AuthError("User not found", 404, "USER_NOT_FOUND");
     return mapUser(row);
+  }
+
+  private requireOwner(userId: string): AuthUser {
+    const user = this.getUser(userId);
+    if (user.status !== "active" || user.role !== "owner") {
+      throw new AuthError(
+        "Only an application owner can manage registrations",
+        403,
+        "OWNER_REQUIRED",
+      );
+    }
+    return user;
+  }
+
+  public listPendingRegistrations(ownerId: string): AuthUser[] {
+    this.requireOwner(ownerId);
+    return (this.db.prepare(`
+      SELECT * FROM users
+      WHERE status = 'pending'
+      ORDER BY created_at ASC, username_normalized ASC
+    `).all() as UserRow[]).map(mapUser);
+  }
+
+  private transitionRegistration(
+    ownerId: string,
+    registrationId: string,
+    status: "active" | "disabled",
+  ): AuthUser {
+    this.requireOwner(ownerId);
+    const transition = this.db.transaction(() => {
+      const now = this.now().toISOString();
+      const result = this.db.prepare(`
+        UPDATE users SET status = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(status, now, registrationId);
+      if (result.changes !== 1) {
+        const exists = this.db.prepare("SELECT 1 FROM users WHERE id = ?").get(registrationId);
+        if (!exists) {
+          throw new AuthError("Registration not found", 404, "REGISTRATION_NOT_FOUND");
+        }
+        throw new AuthError(
+          "Registration is no longer pending",
+          409,
+          "REGISTRATION_NOT_PENDING",
+        );
+      }
+      if (status === "active") initializeUserSettings(this.db, registrationId);
+      return this.getUser(registrationId);
+    });
+    return transition();
+  }
+
+  public approveRegistration(ownerId: string, registrationId: string): AuthUser {
+    return this.transitionRegistration(ownerId, registrationId, "active");
+  }
+
+  public rejectRegistration(ownerId: string, registrationId: string): AuthUser {
+    return this.transitionRegistration(ownerId, registrationId, "disabled");
   }
 
   public resolveLoginUserId(identifierInput: unknown): string | null {
@@ -630,7 +697,15 @@ export class AuthService {
       return null;
     }
     const valid = await verifyPassword(password, row.password_hash);
-    if (!valid || row.status !== "active") return null;
+    if (!valid) return null;
+    if (row.status === "pending") {
+      throw new AuthError(
+        "Account registration is awaiting owner approval",
+        403,
+        "ACCOUNT_PENDING",
+      );
+    }
+    if (row.status !== "active") return null;
 
     if (needsPasswordRehash(row.password_hash, this.passwordOptions)) {
       const replacement = await hashPassword(password, this.passwordOptions);
@@ -654,6 +729,13 @@ export class AuthService {
 
   public createSession(userId: string, metadata: SessionMetadata = {}): CreatedSession {
     const user = this.getUser(userId);
+    if (user.status === "pending") {
+      throw new AuthError(
+        "Account registration is awaiting owner approval",
+        403,
+        "ACCOUNT_PENDING",
+      );
+    }
     if (user.status !== "active") {
       throw new AuthError("Invalid username or password", 401, "INVALID_CREDENTIALS");
     }
