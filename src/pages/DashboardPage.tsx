@@ -23,17 +23,14 @@ import {
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useResource } from "../hooks";
-import { assetKindLabels, formatDateTime, formatMoney, stringFromUnknown } from "../utils";
+import {
+  assetKindLabels,
+  formatCompactMoney,
+  formatDateTime,
+  formatMoney,
+  stringFromUnknown,
+} from "../utils";
 import { Button, EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "../components/ui";
-
-function compactMoney(value: number, currency: string) {
-  return new Intl.NumberFormat("zh-CN", {
-    notation: "compact",
-    style: "currency",
-    currency,
-    maximumFractionDigits: 1,
-  }).format(value);
-}
 
 export default function DashboardPage() {
   const { data, loading, error, reload } = useResource(api.dashboard);
@@ -95,7 +92,7 @@ export default function DashboardPage() {
                     <AreaChart data={data.trend} margin={{ top: 8, right: 8, left: 4, bottom: 0 }}>
                       <CartesianGrid stroke="#edf0f3" vertical={false} />
                       <XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fill: "#6b7280", fontSize: 12 }} minTickGap={28} />
-                      <YAxis tickLine={false} axisLine={false} width={64} tick={{ fill: "#6b7280", fontSize: 12 }} tickFormatter={(value: number) => compactMoney(value, data.baseCurrency)} />
+                      <YAxis tickLine={false} axisLine={false} width={64} tick={{ fill: "#6b7280", fontSize: 12 }} tickFormatter={(value: number) => formatCompactMoney(value, data.baseCurrency)} />
                       <Tooltip formatter={(value) => formatMoney(Number(value), data.baseCurrency)} contentStyle={{ borderRadius: 6, borderColor: "#e4e4e7" }} />
                       <Area type="monotone" dataKey="value" stroke="#2563eb" strokeWidth={2} fill="#dbeafe" fillOpacity={0.65} isAnimationActive={false} />
                     </AreaChart>

@@ -53,6 +53,24 @@ export function formatMoney(value: string | number, currency = "CNY") {
   }
 }
 
+export function formatCompactMoney(value: string | number, currency = "CNY") {
+  const numeric = typeof value === "number" ? value : Number(value || 0);
+  if (!Number.isFinite(numeric)) return `-- ${currency}`;
+  const options: Intl.NumberFormatOptions = {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  };
+  try {
+    return new Intl.NumberFormat("zh-CN", {
+      ...options,
+      style: "currency",
+      currency,
+    }).format(numeric);
+  } catch {
+    return `${new Intl.NumberFormat("zh-CN", options).format(numeric)} ${currency}`;
+  }
+}
+
 export function formatNumber(value: string | number, maximumFractionDigits = 6) {
   const numeric = typeof value === "number" ? value : Number(value || 0);
   if (!Number.isFinite(numeric)) return "--";
