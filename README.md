@@ -284,7 +284,7 @@ docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-ba
 
 请求只允许固定的 HTTPS 域名，禁止重定向，单次请求有超时和 512 KiB 响应上限，报价链有总时限并使用短缓存。需要代理时使用 `PRICE_PROXY=http://host:port`；Docker 容器不能填写容器内的 `127.0.0.1`，应填写容器可达的宿主机地址。也可使用 `PRICE_TIMEOUT_MS`、`PRICE_MAX_QUOTE_TIME_MS` 和 `PRICE_CACHE_TTL_MS` 调整网络参数。
 
-账户名仅用于选源，不会被当作 URL。`NVDAon`、`QQQon`、`IBMon` 等 Ondo 代币会按 OKX 的 `X...`、Bitget 的 `R...` 市场别名查询；`spSEI`、`sUSDat`、`preOPAI` 等无交易所现货对的资产会回退 CoinGecko。新增或纠正映射可通过受控的 `PRICE_SYMBOL_ALIASES_JSON`、`PRICE_COINGECKO_IDS_JSON` 配置，不要把用户输入直接拼接为 endpoint。
+账户名仅用于选源，不会被当作 URL。`U` 按 United Stables 处理，优先查询 Binance `UUSDT` 并回退 CoinGecko，不能当作 USDT 的账户别名。`NVDAon`、`QQQon`、`IBMon` 默认按 Yahoo Finance 的 `NVDA`、`QQQ`、`IBM` 底层证券价格估值，再回退 Gate 的同名 Ondo 现货对或 CoinGecko；相近的 OKX `X...`、Bitget `R...` ticker 属于其他代币化产品，不会被自动当成别名。美元证券价格用于 USDT 持仓时会明确记录近似 1:1 换算。`spSEI`、`sUSDat` 等无交易所现货对的资产会优先查询 CoinGecko，`preOPAI` 则优先使用 Bitget 同名现货对。新增或纠正映射可通过受控的 `PRICE_SYMBOL_ALIASES_JSON`、`PRICE_COINGECKO_IDS_JSON` 配置，不要把用户输入直接拼接为 endpoint。
 
 ### 当前 AI 实现状态
 

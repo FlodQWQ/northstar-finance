@@ -501,6 +501,60 @@ export class FinanceRepository {
     return this.getAsset(assetId);
   }
 
+  public updateProviderPrice(
+    assetId: string,
+    expectedVersion: number,
+    quote: { price: string; currency: string; source: string; asOf: string; raw?: unknown },
+  ): VersionedAsset {
+    const now = new Date().toISOString();
+    const write = this.db.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE assets
+        SET current_price = ?, currency = ?, price_source = ?, price_updated_at = ?,
+            version = version + 1, updated_at = ?
+        WHERE owner_id = ? AND id = ? AND version = ? AND price_mode = 'provider'
+      `).run(
+        quote.price,
+        quote.currency,
+        quote.source,
+        quote.asOf,
+        now,
+        this.ownerId,
+        assetId,
+        expectedVersion,
+      );
+      if (result.changes !== 1) {
+        const exists = this.db.prepare("SELECT 1 FROM assets WHERE owner_id = ? AND id = ?")
+          .get(this.ownerId, assetId);
+        if (!exists) throw new DomainError("Asset not found", 404, "ASSET_NOT_FOUND");
+        throw new DomainError(
+          "Asset changed while its market price was being fetched",
+          409,
+          "ASSET_CHANGED",
+        );
+      }
+
+      this.db.prepare(`
+        INSERT OR IGNORE INTO price_snapshots (
+          id, owner_id, asset_id, price, currency, source, as_of_at, fetched_at, raw_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        this.ownerId,
+        assetId,
+        quote.price,
+        quote.currency,
+        quote.source,
+        quote.asOf,
+        now,
+        JSON.stringify(quote.raw ?? {}),
+        now,
+      );
+    });
+    write();
+    return this.getAsset(assetId);
+  }
+
   public listPrices(assetId: string): Row[] {
     this.getAsset(assetId);
     return (this.db.prepare(`

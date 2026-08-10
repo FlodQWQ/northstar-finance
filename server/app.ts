@@ -101,6 +101,74 @@ function asyncRoute(
   };
 }
 
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index]);
+    }
+  }));
+
+  return results;
+}
+
+function createAsyncLimiter(concurrency: number) {
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  return async function runLimited<T>(task: () => Promise<T>): Promise<T> {
+    if (active >= concurrency) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active += 1;
+    try {
+      return await task();
+    } finally {
+      active -= 1;
+      queue.shift()?.();
+    }
+  };
+}
+
+function batchPriceError(error: unknown): { code: string; message: string } {
+  if (error instanceof ZodError) {
+    return {
+      code: "PRICE_INVALID",
+      message: "Price provider returned an invalid price",
+    };
+  }
+  if (error instanceof PriceProviderError) {
+    const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+      ? error.code
+      : "PRICE_REFRESH_FAILED";
+    return {
+      code,
+      message: "Price provider could not return a quote",
+    };
+  }
+  if (error instanceof DomainError) {
+    return {
+      code: error.code,
+      message: error.code === "ASSET_CHANGED"
+        ? "Asset changed while its provider price was being fetched"
+        : "Asset price could not be updated",
+    };
+  }
+  return {
+    code: "PRICE_REFRESH_FAILED",
+    message: "Price refresh failed",
+  };
+}
+
 interface RequestServices {
   session?: AuthenticatedSession;
   apiPrincipal?: ApiTokenPrincipal;
@@ -270,6 +338,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   // the same isolated worker, while research results remain scoped by repository.
   const aiProvider = options.aiProvider ?? createApplicationAIProviderFromEnv();
   const priceProvider = options.priceProvider ?? createPriceProviderFromEnv();
+  const runPriceQuote = createAsyncLimiter(4);
   const emailOutboxFor = (ownerRepository: FinanceRepository) =>
     options.emailOutbox ?? new SmtpEmailOutbox(db, ownerRepository);
   const emailOutbox = emailOutboxFor(repository);
@@ -569,6 +638,71 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
       .filter((asset) => kind === undefined || asset.kind === kind);
     response.json(data(assets));
   });
+
+  app.post("/api/assets/prices/refresh", asyncRoute(async (_request, response) => {
+    const ownerRepository = services(response).repository;
+    const assets = ownerRepository.listAssets();
+    const providerAssets = assets.filter((asset) => asset.priceMode === "provider");
+    const skipped = assets
+      .filter((asset) => asset.priceMode !== "provider")
+      .map((asset) => ({
+        id: asset.id,
+        name: asset.name,
+        reason: "PRICE_MODE_MANUAL" as const,
+      }));
+
+    const outcomes = priceProvider.id === "manual"
+      ? providerAssets.map((asset) => ({
+          status: "failed" as const,
+          value: {
+            id: asset.id,
+            name: asset.name,
+            error: {
+              code: "PRICE_PROVIDER_DISABLED",
+              message: "Price provider is disabled",
+            },
+          },
+        }))
+      : await mapWithConcurrency(providerAssets, 4, async (asset) => {
+          try {
+            // No database transaction spans this network request. The guarded
+            // repository write records the quote only if the asset is unchanged.
+            const quote = await runPriceQuote(() => priceProvider.getQuote(asset));
+            quote.price = nonNegativeDecimalString.parse(quote.price);
+            const updated = ownerRepository.updateProviderPrice(asset.id, asset.version, quote);
+            return {
+              status: "updated" as const,
+              value: {
+                id: updated.id,
+                name: updated.name,
+                currentPrice: updated.currentPrice,
+                currency: updated.currency,
+                source: updated.priceSource,
+                priceUpdatedAt: updated.priceUpdatedAt,
+              },
+            };
+          } catch (error) {
+            return {
+              status: "failed" as const,
+              value: {
+                id: asset.id,
+                name: asset.name,
+                error: batchPriceError(error),
+              },
+            };
+          }
+        });
+    const updated = outcomes
+      .filter((outcome): outcome is Extract<typeof outcome, { status: "updated" }> =>
+        outcome.status === "updated")
+      .map((outcome) => outcome.value);
+    const failed = outcomes
+      .filter((outcome): outcome is Extract<typeof outcome, { status: "failed" }> =>
+        outcome.status === "failed")
+      .map((outcome) => outcome.value);
+
+    response.json(data({ updated, skipped, failed }, "Asset prices refreshed"));
+  }));
 
   app.post("/api/assets", (request, response) => {
     const input = parse(assetCreateSchema, request.body);

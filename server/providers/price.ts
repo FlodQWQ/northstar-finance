@@ -102,7 +102,14 @@ export interface MarketPriceProviderOptions {
   symbolAliases?: Record<string, string>;
 }
 
-export type PriceVenue = "binance" | "okx" | "bitget" | "bybit" | "gate" | "coingecko";
+export type PriceVenue =
+  | "binance"
+  | "okx"
+  | "bitget"
+  | "bybit"
+  | "gate"
+  | "coingecko"
+  | "yahoo";
 
 interface MarketRequest {
   base: string;
@@ -130,6 +137,7 @@ const ALLOWED_HOSTS = new Set([
   "api.bybit.com",
   "api.gateio.ws",
   "api.coingecko.com",
+  "query1.finance.yahoo.com",
 ]);
 
 const DEFAULT_COINGECKO_IDS: Record<string, string> = {
@@ -140,6 +148,7 @@ const DEFAULT_COINGECKO_IDS: Record<string, string> = {
   OKB: "okb",
   XAUT: "tether-gold",
   USDT: "tether",
+  U: "united-stables",
   USDC: "usd-coin",
   SEI: "sei-network",
   RLUSD: "ripple-usd",
@@ -153,23 +162,32 @@ const DEFAULT_COINGECKO_IDS: Record<string, string> = {
   SUSDAT: "saturn-susdat",
 };
 
-const DEFAULT_VENUE_SYMBOL_ALIASES: Record<string, string> = {
-  // OKX lists Ondo tokenized instruments with an X prefix.
-  "OKX:NVDAON": "XNVDA",
-  "OKX:QQQON": "XQQQ",
-  "OKX:IBMON": "XIBM",
-  // Bitget uses Republic/RWA symbols with an R prefix.
-  "BITGET:NVDAON": "RNVDA",
-  "BITGET:QQQON": "RQQQ",
-  "BITGET:IBMON": "RIBM",
+const DEFAULT_VENUE_SYMBOL_ALIASES: Record<string, string> = {};
+
+// The user elected to value Ondo holdings from their underlying securities;
+// Yahoo quotes are therefore recorded explicitly as proxies. Similar
+// X-prefixed and R-prefixed tickers are separate tokenized products and must
+// not be treated as aliases merely because their prices are close.
+const DEFAULT_SOURCE_VENUES: Partial<Record<string, readonly PriceVenue[]>> = {
+  NVDAON: ["yahoo", "gate", "coingecko"],
+  QQQON: ["yahoo", "gate", "coingecko"],
+  IBMON: ["yahoo", "coingecko"],
+  SPSEI: ["coingecko"],
+  SUSDAT: ["coingecko"],
+};
+
+const DEFAULT_UNDERLYING_SECURITY_SYMBOLS: Record<string, string> = {
+  NVDAON: "NVDA",
+  QQQON: "QQQ",
+  IBMON: "IBM",
 };
 
 // These assets are either stable-value instruments or account labels rather
 // than exchange symbols. Explicit pegs avoid needless upstream calls. sUSDat
-// is intentionally excluded: the supplied holding price (0.8859) indicates
-// it can trade away from its target and should be queried when possible.
-const PEGGED_SYMBOLS = new Set(["USDT", "U", "USD1", "RLUSD", "USDTDEBT"]);
-const STABLE_SYMBOLS = new Set([...PEGGED_SYMBOLS, "SUSDAT"]);
+// is intentionally excluded: it can trade away from its target, so an
+// upstream outage must not silently replace its last quote with 1 USDT.
+const PEGGED_SYMBOLS = new Set(["USDT", "USD1", "RLUSD", "USDTDEBT"]);
+const STABLE_SYMBOLS = new Set([...PEGGED_SYMBOLS, "U"]);
 const PEG_COMPATIBLE_CURRENCIES = new Set(["USD", "USDT", "USDC", "USD1", "RLUSD"]);
 
 function normalizeSymbol(value: string): string {
@@ -214,6 +232,7 @@ function venueFromText(value: string): PriceVenue | undefined {
   if (normalized.includes("bybit")) return "bybit";
   if (normalized.includes("gate")) return "gate";
   if (normalized.includes("coingecko") || normalized.includes("coin gecko")) return "coingecko";
+  if (normalized.includes("yahoo")) return "yahoo";
   return undefined;
 }
 
@@ -235,9 +254,6 @@ function assetBaseSymbol(asset: Asset, aliases: Record<string, string>): string 
   const rawName = normalizeSymbol(asset.name);
   const explicit = aliases[rawSymbol] ?? aliases[rawName];
   if (explicit) return explicit;
-  // The supplied Binance "U" wallet line is a USDT balance label. Keep the
-  // alias narrow and deterministic; other symbols are not guessed.
-  if (rawSymbol === "U" && venueFromText(asset.account) === "binance") return "USDT";
   if (rawName === "USDTDEBT" || rawSymbol === "USDTDEBT") return "USDT";
   if (!rawSymbol && rawName === "GATE") return "USDT";
   if (!rawSymbol) {
@@ -356,7 +372,10 @@ class JsonHttpClient {
       try {
         response = await this.fetchImpl(url, {
           method: "GET",
-          headers: { accept: "application/json" },
+          headers: {
+            accept: "application/json",
+            "user-agent": "Mozilla/5.0 (compatible; NorthstarFinance/0.1)",
+          },
           redirect: "error",
           signal: controller.signal,
           ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
@@ -574,6 +593,49 @@ class GateAdapter extends ExchangeAdapter {
   }
 }
 
+class YahooFinanceAdapter implements PriceAdapter {
+  public readonly id = "yahoo" as const;
+
+  public constructor(private readonly http: JsonHttpClient) {}
+
+  public async getQuote(request: MarketRequest): Promise<PriceQuote | null> {
+    if (!isPegCompatibleCurrency(request.outputCurrency)) return null;
+    const body = await this.http.getJson(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(request.base)}?interval=1d&range=5d`,
+      request.timeoutMs,
+    );
+    if (!body || typeof body !== "object") return null;
+    const chart = (body as Record<string, unknown>).chart;
+    if (!chart || typeof chart !== "object") return null;
+    const result = (chart as Record<string, unknown>).result;
+    const row = Array.isArray(result) ? result[0] : undefined;
+    if (!row || typeof row !== "object") return null;
+    const meta = (row as Record<string, unknown>).meta;
+    if (!meta || typeof meta !== "object") return null;
+    const metaObject = meta as Record<string, unknown>;
+    if (metaObject.currency !== "USD") return null;
+    if (
+      typeof metaObject.symbol === "string"
+      && normalizeSymbol(metaObject.symbol) !== request.base
+    ) return null;
+    return quoteFromValue(
+      metaObject.regularMarketPrice,
+      `yahoo-underlying:${request.base}:USD`,
+      request.outputCurrency,
+      {
+        symbol: metaObject.symbol,
+        instrumentType: metaObject.instrumentType,
+        exchangeName: metaObject.exchangeName,
+        marketCurrency: "USD",
+        approximatePeg: request.outputCurrency !== "USD",
+        underlyingProxy: true,
+        underlyingSymbol: request.base,
+      },
+      metaObject.regularMarketTime,
+    );
+  }
+}
+
 class CoinGeckoAdapter implements PriceAdapter {
   public readonly id = "coingecko" as const;
 
@@ -639,6 +701,7 @@ export class MultiSourcePriceProvider implements PriceProvider {
   private readonly symbolAliases: Record<string, string>;
   private readonly coingeckoIds: Record<string, string>;
   private readonly cache = new Map<string, CachedQuote>();
+  private readonly inFlight = new Map<string, Promise<PriceQuote | null>>();
 
   public constructor(options: MarketPriceProviderOptions = {}) {
     this.timeoutMs = clampInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1_000, 30_000);
@@ -664,6 +727,7 @@ export class MultiSourcePriceProvider implements PriceProvider {
       new BitgetAdapter(this.http),
       new BybitAdapter(this.http),
       new GateAdapter(this.http),
+      new YahooFinanceAdapter(this.http),
       new CoinGeckoAdapter(this.http, this.coingeckoIds),
     ];
     this.adapters = new Map(adapters.map((adapter) => [adapter.id, adapter]));
@@ -689,7 +753,7 @@ export class MultiSourcePriceProvider implements PriceProvider {
       }) as PriceQuote;
     }
     const stableFallback = isStableAsset(asset, base);
-    const venues = this.orderedVenues(asset);
+    const venues = this.orderedVenues(asset, base);
     const deadline = Date.now() + this.maxQuoteTimeMs;
     const errors: string[] = [];
     for (const venue of venues) {
@@ -699,7 +763,7 @@ export class MultiSourcePriceProvider implements PriceProvider {
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 0) break;
         // CoinGecko uses the requested display currency; exchanges use USDT.
-        if (venue !== "coingecko" && quoteCurrency !== "USDT") continue;
+        if (venue !== "coingecko" && venue !== "yahoo" && quoteCurrency !== "USDT") continue;
         const request: MarketRequest = {
           base: this.marketBaseFor(venue, base),
           quote: quoteCurrency,
@@ -712,7 +776,7 @@ export class MultiSourcePriceProvider implements PriceProvider {
         if (cached && cached.expiresAt > Date.now()) return cached.quote;
         if (cached) this.cache.delete(cacheKey);
         try {
-          const quote = await adapter.getQuote(request);
+          const quote = await this.getQuoteInFlight(cacheKey, adapter, request);
           if (!quote) continue;
           this.putCache(cacheKey, quote);
           return quote;
@@ -781,16 +845,33 @@ export class MultiSourcePriceProvider implements PriceProvider {
     }
   }
 
-  private orderedVenues(asset: Asset): PriceVenue[] {
+  private orderedVenues(asset: Asset, normalizedBase: string): PriceVenue[] {
     const hinted = venueFromText(asset.account ?? "") ?? venueFromText(asset.priceSource ?? "");
     const first = hinted ?? this.preferredVenue;
+    const semanticSources = DEFAULT_SOURCE_VENUES[normalizedBase] ?? [];
     const all: PriceVenue[] = ["binance", "okx", "bitget", "bybit", "gate", "coingecko"];
-    if (!first) return all;
-    return [first, ...all.filter((venue) => venue !== first)];
+    return [...semanticSources, first, ...all]
+      .filter((venue): venue is PriceVenue => venue !== undefined)
+      .filter((venue, index, venues) => venues.indexOf(venue) === index);
+  }
+
+  private getQuoteInFlight(
+    cacheKey: string,
+    adapter: PriceAdapter,
+    request: MarketRequest,
+  ): Promise<PriceQuote | null> {
+    const existing = this.inFlight.get(cacheKey);
+    if (existing) return existing;
+    const pending = adapter.getQuote(request).finally(() => {
+      if (this.inFlight.get(cacheKey) === pending) this.inFlight.delete(cacheKey);
+    });
+    this.inFlight.set(cacheKey, pending);
+    return pending;
   }
 
   private marketBaseFor(venue: PriceVenue, normalizedBase: string): string {
     return this.symbolAliases[`${venue.toUpperCase()}:${normalizedBase}`]
+      ?? (venue === "yahoo" ? DEFAULT_UNDERLYING_SECURITY_SYMBOLS[normalizedBase] : undefined)
       ?? this.symbolAliases[normalizedBase]
       ?? normalizedBase;
   }

@@ -159,6 +159,27 @@ export type PriceInput = {
   asOf?: string;
 };
 
+export interface PriceRefreshResult {
+  updated: Array<{
+    id: string;
+    name: string;
+    currentPrice: string;
+    currency: string;
+    source: string;
+    priceUpdatedAt: string;
+  }>;
+  skipped: Array<{
+    id: string;
+    name: string;
+    reason: "PRICE_MODE_MANUAL";
+  }>;
+  failed: Array<{
+    id: string;
+    name: string;
+    error: { code: string; message: string };
+  }>;
+}
+
 export type ExpectedInput = Omit<
   ExpectedAsset,
   "id" | "createdAt" | "updatedAt" | "lastCheckedAt"
@@ -219,6 +240,10 @@ export const api = {
   assets: {
     list: () => request<Asset[]>("/api/assets"),
     create: (input: AssetInput) => request<Asset>("/api/assets", { method: "POST", body: input }),
+    refreshPrices: () => request<PriceRefreshResult>("/api/assets/prices/refresh", {
+      method: "POST",
+      body: {},
+    }),
     updatePrice: (id: string, input: PriceInput) =>
       request<Asset>(`/api/assets/${id}/price`, { method: "POST", body: input }),
     createOperation: (id: string, input: OperationInput) =>

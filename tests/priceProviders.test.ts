@@ -7,6 +7,7 @@ import {
   MultiSourcePriceProvider,
   PriceProviderError,
   createPriceProviderFromEnv,
+  type PriceProvider,
 } from "../server/providers/price";
 
 function asset(overrides: Partial<Asset> = {}): Asset {
@@ -113,6 +114,23 @@ describe("public market price providers", () => {
     expect(calls.some((url) => url.includes("www.okx.com"))).toBe(true);
   });
 
+  it("queries United Stables U instead of treating it as a USDT label", async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain("symbol=UUSDT");
+      return json({ symbol: "UUSDT", price: "0.999375" });
+    });
+    const provider = new MultiSourcePriceProvider({ fetchImpl, cacheTtlMs: 0 });
+
+    const quote = await provider.getQuote(asset({
+      name: "United Stables",
+      symbol: "U",
+      account: "binance wallet",
+    }));
+
+    expect(quote).toMatchObject({ price: "0.999375", source: "binance:UUSDT" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("uses CoinGecko for a CNY-denominated asset", async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       expect(url).toContain("api.coingecko.com/api/v3/simple/price");
@@ -160,10 +178,111 @@ describe("public market price providers", () => {
     });
   });
 
-  it("maps tokenized equity labels to each venue's market symbol", async () => {
+  it("prices Ondo holdings from their underlying listed security", async () => {
+    const calls: string[] = [];
     const fetchImpl = vi.fn(async (url: string) => {
-      if (url.includes("okx") && url.includes("XIBM-USDT")) {
-        return json({ code: "0", data: [{ instId: "XIBM-USDT", last: "237.73" }] });
+      calls.push(url);
+      if (url.includes("finance.yahoo.com") && url.includes("/chart/NVDA")) {
+        return json({
+          chart: {
+            result: [{
+              meta: {
+                currency: "USD",
+                symbol: "NVDA",
+                instrumentType: "EQUITY",
+                exchangeName: "NMS",
+                regularMarketPrice: 223.96,
+                regularMarketTime: 1_700_000_000,
+              },
+            }],
+            error: null,
+          },
+        });
+      }
+      return json({}, 404);
+    });
+    const provider = new MultiSourcePriceProvider({ fetchImpl, cacheTtlMs: 0, maxQuoteTimeMs: 5_000 });
+
+    const quote = await provider.getQuote(asset({ symbol: "NVDAon", account: "okx wallet" }));
+
+    expect(quote).toMatchObject({
+      price: "223.96",
+      currency: "USDT",
+      source: "yahoo-underlying:NVDA:USD",
+      asOf: "2023-11-14T22:13:20.000Z",
+    });
+    expect(quote.raw).toMatchObject({
+      underlyingProxy: true,
+      underlyingSymbol: "NVDA",
+    });
+    expect(quote.raw).not.toHaveProperty("portfolioSymbol");
+    expect(calls[0]).toContain("/chart/NVDA");
+    expect(calls.join("\n")).not.toMatch(/XNVDA|RNVDA/);
+  });
+
+  it("coalesces concurrent quotes for the same underlying security", async () => {
+    const fetchImpl = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return json({
+        chart: {
+          result: [{
+            meta: {
+              currency: "USD",
+              symbol: "NVDA",
+              instrumentType: "EQUITY",
+              exchangeName: "NMS",
+              regularMarketPrice: 223.96,
+              regularMarketTime: 1_700_000_000,
+            },
+          }],
+          error: null,
+        },
+      });
+    });
+    const provider = new MultiSourcePriceProvider({ fetchImpl, cacheTtlMs: 0 });
+
+    const quotes = await Promise.all([
+      provider.getQuote(asset({ id: "ondo-a", symbol: "NVDAon", account: "binance" })),
+      provider.getQuote(asset({ id: "ondo-b", symbol: "NVDAon", account: "okx wallet" })),
+    ]);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(quotes.map((quote) => quote.source)).toEqual([
+      "yahoo-underlying:NVDA:USD",
+      "yahoo-underlying:NVDA:USD",
+    ]);
+    expect(quotes[0].raw).not.toHaveProperty("portfolioSymbol");
+  });
+
+  it("falls back to the exact Ondo token market without using X/R aliases", async () => {
+    const calls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      calls.push(url);
+      if (url.includes("finance.yahoo.com")) return json({}, 503);
+      if (url.includes("gateio") && url.includes("QQQON_USDT")) {
+        return json([{ currency_pair: "QQQON_USDT", last: "724.73" }]);
+      }
+      return json({}, 404);
+    });
+    const provider = new MultiSourcePriceProvider({ fetchImpl, cacheTtlMs: 0, maxQuoteTimeMs: 5_000 });
+
+    const quote = await provider.getQuote(asset({ symbol: "QQQon", account: "gate" }));
+
+    expect(quote).toMatchObject({ price: "724.73", source: "gate:QQQON_USDT" });
+    expect(calls[0]).toContain("/chart/QQQ");
+    expect(calls.some((url) => url.includes("QQQON_USDT"))).toBe(true);
+    expect(calls.join("\n")).not.toMatch(/XQQQ|RQQQ/);
+  });
+
+  it("falls back from IBM underlying pricing to the exact Ondo CoinGecko id", async () => {
+    const calls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      calls.push(url);
+      if (url.includes("finance.yahoo.com")) return json({}, 503);
+      if (url.includes("coingecko")) {
+        return json({
+          "ibm-ondo-tokenized-stock": { usd: 240.84, last_updated_at: 1_700_000_000 },
+        });
       }
       return json({}, 404);
     });
@@ -171,8 +290,14 @@ describe("public market price providers", () => {
 
     const quote = await provider.getQuote(asset({ symbol: "IBMon", account: "okx wallet" }));
 
-    expect(quote).toMatchObject({ price: "237.73", source: "okx:XIBM-USDT" });
-    expect(fetchImpl.mock.calls[0]?.[0]).toContain("XIBM-USDT");
+    expect(quote).toMatchObject({
+      price: "240.84",
+      source: "coingecko:ibm-ondo-tokenized-stock:usd",
+    });
+    expect(calls[0]).toContain("/chart/IBM");
+    const coinGeckoCall = calls.find((url) => url.includes("coingecko"));
+    expect(coinGeckoCall).toContain("ids=ibm-ondo-tokenized-stock");
+    expect(calls.join("\n")).not.toMatch(/XIBM|RIBM/);
   });
 
   it("uses a CoinGecko USD fallback for a synthetic asset missing on exchanges", async () => {
@@ -209,6 +334,21 @@ describe("public market price providers", () => {
 
     expect(quote).toMatchObject({ price: "1", currency: "USDT", source: "stable-peg" });
     expect(fetchImpl.mock.calls.length).toBe(0);
+  });
+
+  it("does not replace a depegged yield asset with a one-unit fallback", async () => {
+    const provider = new MultiSourcePriceProvider({
+      fetchImpl: vi.fn(async () => json({}, 503)),
+      cacheTtlMs: 0,
+      maxQuoteTimeMs: 2_000,
+    });
+
+    await expect(provider.getQuote(asset({
+      name: "Saturn sUSDat",
+      symbol: "sUSDat",
+      account: "okx wallet",
+      currentPrice: "0.8859",
+    }))).rejects.toMatchObject({ code: "PRICE_UNAVAILABLE" });
   });
 
   it("recognizes a blank stablecoin symbol from its denomination", async () => {
@@ -353,6 +493,215 @@ describe("price provider API integration", () => {
 
       const response = await request(app).post("/api/assets/provider-failed/price").send({}).expect(502);
       expect(response.body.error).toEqual({ code: "PRICE_UNAVAILABLE", message: "No quote available" });
+    } finally {
+      app.finance.close();
+    }
+  });
+
+  it("batch refreshes provider assets with four workers and isolates item failures", async () => {
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    const providerCalls: string[] = [];
+    const transactionStates: boolean[] = [];
+    let app: ReturnType<typeof createApp>;
+    const provider: PriceProvider = {
+      id: "batch-test",
+      getQuote: async (current) => {
+        providerCalls.push(current.id);
+        transactionStates.push(app.finance.db.inTransaction);
+        activeRequests += 1;
+        maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeRequests -= 1;
+        if (current.symbol === "NOQUOTE") {
+          throw new PriceProviderError(
+            "raw upstream body: secret-provider-payload",
+            "PRICE_UNAVAILABLE",
+            502,
+          );
+        }
+        if (current.symbol === "BROKEN") {
+          throw new Error("raw upstream body: secret-unexpected-payload");
+        }
+        if (current.symbol === "NEGATIVE") {
+          return {
+            price: "-1",
+            currency: "USDT",
+            source: "batch-test",
+            asOf: "2026-08-10T08:00:00.000Z",
+          };
+        }
+        return {
+          price: String(100 + Number(current.symbol.slice(-1))),
+          currency: "USDT",
+          source: `batch-test:${current.symbol}`,
+          asOf: "2026-08-10T08:00:00.000Z",
+        };
+      },
+      testConnection: async () => ({ ok: true, status: "connected", message: "ready" }),
+    };
+    app = createApp({
+      databasePath: ":memory:",
+      seed: false,
+      serveStatic: false,
+      disableAuthenticationForTests: true,
+      priceProvider: provider,
+    });
+
+    try {
+      const createAsset = async (id: string, symbol: string, priceMode: "manual" | "provider") => {
+        await request(app).post("/api/assets").send({
+          id,
+          name: id,
+          symbol,
+          kind: "crypto",
+          account: "test",
+          currency: "USDT",
+          quantity: "1",
+          unitCost: "0",
+          currentPrice: "0",
+          priceMode,
+          priceSource: priceMode,
+        }).expect(201);
+      };
+      await Promise.all([
+        createAsset("provider-good-1", "GOOD1", "provider"),
+        createAsset("provider-good-2", "GOOD2", "provider"),
+        createAsset("provider-good-3", "GOOD3", "provider"),
+        createAsset("provider-good-4", "GOOD4", "provider"),
+        createAsset("provider-no-quote", "NOQUOTE", "provider"),
+        createAsset("provider-broken", "BROKEN", "provider"),
+        createAsset("provider-negative", "NEGATIVE", "provider"),
+        createAsset("manual-asset", "MANUAL", "manual"),
+      ]);
+
+      const response = await request(app)
+        .post("/api/assets/prices/refresh")
+        .send({})
+        .expect(200);
+
+      expect(response.body.data.updated).toHaveLength(4);
+      expect(response.body.data.skipped).toEqual([
+        { id: "manual-asset", name: "manual-asset", reason: "PRICE_MODE_MANUAL" },
+      ]);
+      expect(response.body.data.failed).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: "provider-no-quote",
+          error: {
+            code: "PRICE_UNAVAILABLE",
+            message: "Price provider could not return a quote",
+          },
+        }),
+        expect.objectContaining({
+          id: "provider-broken",
+          error: { code: "PRICE_REFRESH_FAILED", message: "Price refresh failed" },
+        }),
+        expect.objectContaining({
+          id: "provider-negative",
+          error: { code: "PRICE_INVALID", message: "Price provider returned an invalid price" },
+        }),
+      ]));
+      expect(JSON.stringify(response.body)).not.toContain("secret-provider-payload");
+      expect(JSON.stringify(response.body)).not.toContain("secret-unexpected-payload");
+      expect(providerCalls).not.toContain("manual-asset");
+      expect(maxActiveRequests).toBe(4);
+      expect(transactionStates.every((state) => state === false)).toBe(true);
+      expect(app.finance.db.prepare("SELECT COUNT(*) FROM price_snapshots").pluck().get()).toBe(4);
+    } finally {
+      app.finance.close();
+    }
+  });
+
+  it("batch refreshes only assets owned by the authenticated tenant", async () => {
+    const origin = "http://northstar-price.test";
+    const providerCalls: string[] = [];
+    const app = createApp({
+      databasePath: ":memory:",
+      seed: false,
+      serveStatic: false,
+      appBaseUrl: origin,
+      priceProvider: {
+        id: "tenant-test",
+        getQuote: async (current) => {
+          providerCalls.push(current.id);
+          return {
+            price: current.symbol === "ALICE" ? "11" : "22",
+            currency: "USDT",
+            source: "tenant-test",
+            asOf: "2026-08-10T08:00:00.000Z",
+          };
+        },
+        testConnection: async () => ({ ok: true, status: "connected", message: "ready" }),
+      },
+    });
+
+    try {
+      const signedIn = async (username: string) => {
+        const user = await app.finance.authService.register({
+          username,
+          password: "correct horse battery staple",
+        });
+        app.finance.db.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(user.id);
+        const created = app.finance.authService.createSession(user.id, {
+          userAgent: "price provider tenant test",
+          ip: "127.0.0.1",
+        });
+        return {
+          cookie: app.finance.authService.serializeSessionCookie(created).split(";", 1)[0] ?? "",
+          csrfToken: created.session.csrfToken,
+        };
+      };
+      const createOwnedAsset = async (
+        account: Awaited<ReturnType<typeof signedIn>>,
+        id: string,
+        symbol: string,
+      ) => {
+        await request(app)
+          .post("/api/assets")
+          .set("Cookie", account.cookie)
+          .set("Origin", origin)
+          .set("X-CSRF-Token", account.csrfToken)
+          .send({
+            id,
+            name: id,
+            symbol,
+            kind: "crypto",
+            account: "test",
+            currency: "USDT",
+            quantity: "1",
+            unitCost: "0",
+            currentPrice: "0",
+            priceMode: "provider",
+            priceSource: "tenant-test",
+          })
+          .expect(201);
+      };
+      const alice = await signedIn("price-alice");
+      const bob = await signedIn("price-bob");
+      await createOwnedAsset(alice, "alice-provider-asset", "ALICE");
+      await createOwnedAsset(bob, "bob-provider-asset", "BOB");
+
+      const response = await request(app)
+        .post("/api/assets/prices/refresh")
+        .set("Cookie", alice.cookie)
+        .set("Origin", origin)
+        .set("X-CSRF-Token", alice.csrfToken)
+        .send({})
+        .expect(200);
+
+      expect(response.body.data.updated.map((item: { id: string }) => item.id)).toEqual([
+        "alice-provider-asset",
+      ]);
+      expect(providerCalls).toEqual(["alice-provider-asset"]);
+      expect(app.finance.db.prepare(
+        "SELECT current_price FROM assets WHERE id = 'alice-provider-asset'",
+      ).pluck().get()).toBe("11");
+      expect(app.finance.db.prepare(
+        "SELECT current_price FROM assets WHERE id = 'bob-provider-asset'",
+      ).pluck().get()).toBe("0");
+      expect(app.finance.db.prepare(
+        "SELECT COUNT(*) FROM price_snapshots WHERE asset_id = 'bob-provider-asset'",
+      ).pluck().get()).toBe(0);
     } finally {
       app.finance.close();
     }

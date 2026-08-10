@@ -307,6 +307,30 @@ export default function HoldingsPage() {
   const [priceAsset, setPriceAsset] = useState<Asset | null>(null);
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState("all");
+  const [refreshingPrices, setRefreshingPrices] = useState(false);
+  const { notify } = useToast();
+
+  const refreshPrices = async () => {
+    setRefreshingPrices(true);
+    try {
+      const result = await api.assets.refreshPrices();
+      await reload();
+      if (result.failed.length > 0) {
+        notify(
+          `已更新 ${result.updated.length} 项，${result.failed.length} 项失败${result.skipped.length ? `，跳过 ${result.skipped.length} 项` : ""}`,
+          result.updated.length > 0 ? "info" : "error",
+        );
+      } else if (result.updated.length > 0) {
+        notify(`已更新 ${result.updated.length} 项行情${result.skipped.length ? `，跳过 ${result.skipped.length} 项` : ""}`);
+      } else {
+        notify("没有需要从数据源更新的资产", "info");
+      }
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "批量更新行情失败", "error");
+    } finally {
+      setRefreshingPrices(false);
+    }
+  };
 
   const filtered = useMemo(() => (assets || []).filter((asset) => {
     const matchesQuery = `${asset.name} ${asset.symbol} ${asset.account}`.toLowerCase().includes(query.trim().toLowerCase());
@@ -330,7 +354,20 @@ export default function HoldingsPage() {
         eyebrow="直接资产"
         title="持仓"
         description="记录真实余额、成本、价格快照和每一笔操作。"
-        actions={<Button className="primary" type="button" onClick={() => setCreateOpen(true)}><Plus size={17} /> 新增资产</Button>}
+        actions={(
+          <>
+            <Button
+              className="secondary"
+              type="button"
+              onClick={() => void refreshPrices()}
+              disabled={refreshingPrices || loading || !assets?.some((asset) => asset.priceMode === "provider")}
+            >
+              {refreshingPrices ? <LoaderCircle className="spin" size={17} /> : <Globe2 size={17} />}
+              {refreshingPrices ? "正在更新" : "更新行情"}
+            </Button>
+            <Button className="primary" type="button" onClick={() => setCreateOpen(true)}><Plus size={17} /> 新增资产</Button>
+          </>
+        )}
       />
 
       <section className="metric-strip" aria-label="持仓摘要">
