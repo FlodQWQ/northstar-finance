@@ -4,6 +4,7 @@ import { Decimal } from "decimal.js";
 import { z } from "zod";
 import type { SqliteDatabase } from "../db/database";
 import {
+  assetBalanceSchema,
   assetCreateSchema,
   entityId,
   eventCreateSchema,
@@ -35,6 +36,17 @@ const assetPriceCommandSchema = z
     type: z.literal("asset.price.update"),
     payload: priceUpdateSchema
       .extend({ assetId: entityId, price: priceUpdateSchema.shape.price.unwrap() })
+      .strict(),
+  })
+  .strict();
+
+const assetBalanceCommandSchema = z
+  .object({
+    ...commandBase,
+    type: z.literal("asset.balance.calibrate"),
+    payload: assetBalanceSchema
+      .omit({ expectedVersion: true })
+      .extend({ assetId: entityId })
       .strict(),
   })
   .strict();
@@ -81,6 +93,7 @@ const eventUpdateCommandSchema = z
 
 export const aiCommandSchema = z.discriminatedUnion("type", [
   assetCreateCommandSchema,
+  assetBalanceCommandSchema,
   assetPriceCommandSchema,
   assetOperationCommandSchema,
   expectedCreateCommandSchema,
@@ -103,6 +116,7 @@ export type AICommandBatchInput = z.infer<typeof aiCommandBatchSchema>;
 
 export const AI_COMMAND_SCOPES = {
   "asset.create": "assets:write",
+  "asset.balance.calibrate": "assets:write",
   "asset.price.update": "prices:write",
   "asset.operation.record": "operations:write",
   "expected.create": "expected:write",
@@ -168,6 +182,7 @@ function assertVersion(
 }
 
 function requiresConfirmation(command: z.infer<typeof aiCommandSchema>): boolean {
+  if (command.type === "asset.balance.calibrate") return !command.confirmed;
   if (command.type === "asset.operation.record") return !command.confirmed;
   if (command.type === "asset.create") {
     return new Decimal(command.payload.quantity).gt(0) && !command.confirmed;
@@ -221,10 +236,16 @@ export function getAICommandCapabilities(endpoint = "/api/ai/commands/execute") 
         payload: "{ assetId, price, currency?, source?, asOf? }",
       },
       {
+        type: "asset.balance.calibrate",
+        scope: AI_COMMAND_SCOPES["asset.balance.calibrate"],
+        confirmation: "Always required; otherwise returned as a proposal",
+        payload: "{ assetId, quantity, unitCost?, note?, asOf? }",
+      },
+      {
         type: "asset.operation.record",
         scope: AI_COMMAND_SCOPES["asset.operation.record"],
         confirmation: "Always required; otherwise returned as a proposal",
-        payload: "{ assetId, type, quantity?|quantityDelta?, unitPrice?, fee?, currency?, note?, occurredAt? }",
+        payload: "{ assetId, type, quantity|quantityDelta, unitPrice?, fee?, currency?, note?, occurredAt? }; quantityDelta is reserved for adjustment",
       },
       {
         type: "expected.create",
@@ -368,6 +389,20 @@ export class AICommandService {
             });
             result = previewOnly
               ? { valid: true, before: asset.currentPrice, after: updated }
+              : updated;
+            break;
+          }
+          case "asset.balance.calibrate": {
+            const asset = this.repository.getAsset(command.payload.assetId);
+            targetId = asset.id;
+            checkVersion("asset", asset.id, asset.version);
+            const { assetId: _assetId, ...balance } = command.payload;
+            const updated = this.repository.calibrateAssetBalance(asset.id, {
+              ...balance,
+              expectedVersion: asset.version,
+            });
+            result = previewOnly
+              ? { valid: true, before: asset, after: updated }
               : updated;
             break;
           }

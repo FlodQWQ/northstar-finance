@@ -811,6 +811,7 @@ export class MultiSourcePriceProvider implements PriceProvider {
     try {
       const quote = await this.getQuote({
         id: "price-provider-test",
+        version: 1,
         name: "Bitcoin",
         symbol: "BTC",
         kind: "crypto",

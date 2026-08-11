@@ -14,6 +14,7 @@ export type OperationType =
 
 export interface Asset {
   id: string;
+  version: number;
   name: string;
   symbol: string;
   kind: AssetKind;
@@ -33,6 +34,20 @@ export interface Asset {
   notes: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AssetOperation {
+  id: string;
+  assetId: string;
+  type: OperationType;
+  quantityDelta: string;
+  unitPrice: string;
+  fee: string;
+  currency: string;
+  note: string;
+  occurredAt: string;
+  idempotencyKey: string | null;
+  createdAt: string;
 }
 
 export type ExpectedStage =
@@ -157,6 +172,7 @@ export interface ApiEnvelope<T> {
 
 export type AiCommandType =
   | "asset.create"
+  | "asset.balance.calibrate"
   | "asset.price.update"
   | "asset.operation.record"
   | "expected.create"

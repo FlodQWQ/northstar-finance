@@ -8,12 +8,12 @@ import {
   PencilLine,
   Plus,
   RefreshCw,
+  Scale,
   Search,
-  WalletCards,
 } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import type { Asset, AssetKind, OperationType, PriceMode } from "../../shared/types";
-import { api, type AssetInput } from "../api";
+import { ApiError, api, type AssetInput } from "../api";
 import { AssetIcon } from "../components/AssetIcon";
 import { useResource } from "../hooks";
 import { assetKindLabels, formatDateTime, formatMoney, formatNumber, toLocalInputValue } from "../utils";
@@ -150,10 +150,10 @@ function CreateAssetSheet({ open, onClose, onCreated }: { open: boolean; onClose
   );
 }
 
-function OperationSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose: () => void; onSaved: () => void }) {
+function OperationSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose: () => void; onSaved: (updated: Asset) => void }) {
   const [type, setType] = useState<OperationType>("buy");
   const [quantity, setQuantity] = useState("");
-  const [unitPrice, setUnitPrice] = useState("");
+  const [unitPrice, setUnitPrice] = useState(asset?.currentPrice || "");
   const [fee, setFee] = useState("0");
   const [note, setNote] = useState("");
   const [occurredAt, setOccurredAt] = useState(toLocalInputValue(new Date().toISOString()));
@@ -165,7 +165,7 @@ function OperationSheet({ asset, onClose, onSaved }: { asset: Asset | null; onCl
     if (!asset) return;
     setSubmitting(true);
     try {
-      await api.assets.createOperation(asset.id, {
+      const result = await api.assets.createOperation(asset.id, {
         type,
         quantity,
         unitPrice: unitPrice || undefined,
@@ -175,7 +175,7 @@ function OperationSheet({ asset, onClose, onSaved }: { asset: Asset | null; onCl
         occurredAt: occurredAt ? new Date(occurredAt).toISOString() : undefined,
       });
       notify(`${asset.name} 的操作已记录`);
-      onSaved();
+      onSaved(result.asset);
       onClose();
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : "记录操作失败", "error");
@@ -192,7 +192,9 @@ function OperationSheet({ asset, onClose, onSaved }: { asset: Asset | null; onCl
           <div className="form-grid two-column">
             <FormField label="操作类型" required>
               <select value={type} onChange={(event) => setType(event.target.value as OperationType)}>
-                {(Object.entries(operationLabels) as Array<[OperationType, string]>).filter(([value]) => value !== "opening").map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                {(Object.entries(operationLabels) as Array<[OperationType, string]>)
+                  .filter(([value]) => !["opening", "adjustment"].includes(value))
+                  .map(([value, label]) => <option value={value} key={value}>{label}</option>)}
               </select>
             </FormField>
             <FormField label="发生时间" required>
@@ -202,7 +204,7 @@ function OperationSheet({ asset, onClose, onSaved }: { asset: Asset | null; onCl
               <input type="number" inputMode="decimal" step="any" min="0" value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder="0" required />
             </FormField>
             <FormField label="成交单价">
-              <input type="number" inputMode="decimal" step="any" min="0" value={unitPrice} onChange={(event) => setUnitPrice(event.target.value)} placeholder={asset?.currentPrice || "0"} />
+              <input type="number" inputMode="decimal" step="any" min="0" value={unitPrice} onChange={(event) => setUnitPrice(event.target.value)} />
             </FormField>
             <FormField label="手续费">
               <input type="number" inputMode="decimal" step="any" min="0" value={fee} onChange={(event) => setFee(event.target.value)} />
@@ -220,7 +222,7 @@ function OperationSheet({ asset, onClose, onSaved }: { asset: Asset | null; onCl
   );
 }
 
-function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose: () => void; onSaved: () => void }) {
+function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose: () => void; onSaved: (updated: Asset) => void }) {
   const [price, setPrice] = useState(asset?.currentPrice || "");
   const [source, setSource] = useState(asset?.priceSource || "手动录入");
   const [asOf, setAsOf] = useState(toLocalInputValue(new Date().toISOString()));
@@ -236,7 +238,7 @@ function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose:
       setPrice(updated.currentPrice);
       setSource(updated.priceSource);
       setAsOf(toLocalInputValue(updated.priceUpdatedAt));
-      onSaved();
+      onSaved(updated);
       notify(`已从 ${updated.priceSource} 获取价格`);
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : "获取数据源价格失败", "error");
@@ -250,14 +252,14 @@ function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose:
     if (!asset) return;
     setSubmitting(true);
     try {
-      await api.assets.updatePrice(asset.id, {
+      const updated = await api.assets.updatePrice(asset.id, {
         price,
         currency: asset.currency,
         source,
         asOf: asOf ? new Date(asOf).toISOString() : undefined,
       });
       notify(`${asset.name} 的价格已更新`);
-      onSaved();
+      onSaved(updated);
       onClose();
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : "更新价格失败", "error");
@@ -269,7 +271,7 @@ function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose:
   const projected = asset && Number.isFinite(Number(price)) ? Number(asset.quantity) * Number(price) : 0;
   return (
     <Sheet open={Boolean(asset)} onClose={onClose} title="更新资产价格" description={asset ? `${asset.name} · ${asset.symbol}` : ""}>
-      <SheetForm submitLabel="确认更新" submitting={submitting} onSubmit={submit} onCancel={onClose}>
+      <SheetForm submitLabel="保存手动价格" submitting={submitting} onSubmit={submit} onCancel={onClose}>
         <div className="form-section">
           <h3>价格快照</h3>
           <div className="form-grid two-column">
@@ -292,7 +294,7 @@ function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose:
           </div>
           <div className="section-actions">
             <Button className="secondary" type="button" onClick={() => void fetchProviderPrice()} disabled={fetching || submitting}>
-              {fetching ? <LoaderCircle className="spin" size={16} /> : <Globe2 size={16} />} {fetching ? "正在获取" : "从数据源获取"}
+              {fetching ? <LoaderCircle className="spin" size={16} /> : <Globe2 size={16} />} {fetching ? "正在获取" : "立即获取并保存"}
             </Button>
           </div>
         </div>
@@ -301,21 +303,121 @@ function PriceSheet({ asset, onClose, onSaved }: { asset: Asset | null; onClose:
   );
 }
 
+function BalanceSheet({
+  asset,
+  onClose,
+  onSaved,
+  onConflict,
+}: {
+  asset: Asset | null;
+  onClose: () => void;
+  onSaved: (updated: Asset) => void;
+  onConflict: () => void;
+}) {
+  const [quantity, setQuantity] = useState(asset?.quantity || "");
+  const [unitCost, setUnitCost] = useState(asset?.unitCost || "");
+  const [asOf, setAsOf] = useState(toLocalInputValue(new Date().toISOString()));
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const { notify } = useToast();
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!asset) return;
+    setSubmitting(true);
+    try {
+      const updated = await api.assets.updateBalance(asset.id, {
+        quantity,
+        expectedVersion: asset.version,
+        unitCost: unitCost || undefined,
+        note: note || undefined,
+        asOf: asOf ? new Date(asOf).toISOString() : undefined,
+      });
+      notify(`${asset.name} 的余额已校准`);
+      onSaved(updated);
+      onClose();
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "ASSET_VERSION_CONFLICT") {
+        notify("余额已在其他位置更新，已重新载入最新持仓", "error");
+        onConflict();
+      } else {
+        notify(reason instanceof Error ? reason.message : "校准余额失败", "error");
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const numericQuantity = Number(quantity);
+  const numericPrice = Number(asset?.currentPrice);
+  const projected = Number.isFinite(numericQuantity) && Number.isFinite(numericPrice)
+    ? numericQuantity * numericPrice
+    : null;
+
+  return (
+    <Sheet
+      open={Boolean(asset)}
+      onClose={onClose}
+      title="校准资产余额"
+      description={asset ? `${asset.name} · 当前 ${formatNumber(asset.quantity)} ${asset.symbol}` : ""}
+    >
+      <SheetForm submitLabel="确认校准" submitting={submitting} onSubmit={submit} onCancel={onClose}>
+        <div className="form-section">
+          <h3>余额快照</h3>
+          <div className="form-grid two-column">
+            <FormField label="校准后数量" required>
+              <input type="number" inputMode="decimal" step="any" value={quantity} onChange={(event) => setQuantity(event.target.value)} autoFocus required />
+            </FormField>
+            <FormField label="单位成本">
+              <input type="number" inputMode="decimal" step="any" min="0" value={unitCost} onChange={(event) => setUnitCost(event.target.value)} />
+            </FormField>
+            <FormField label="校准时间" required>
+              <input type="datetime-local" value={asOf} onChange={(event) => setAsOf(event.target.value)} required />
+            </FormField>
+            <FormField label={`当前价格（${asset?.currency || ""}）`}>
+              <input value={asset?.currentPrice || ""} readOnly aria-readonly="true" />
+            </FormField>
+          </div>
+          <div className="form-preview balance-preview">
+            <span>
+              更新后市值
+              <small>{quantity === "" ? "--" : formatNumber(quantity)} {asset?.symbol || ""} × {formatMoney(asset?.currentPrice || 0, asset?.currency || "CNY")}</small>
+            </span>
+            <strong>{projected === null ? "--" : formatMoney(projected, asset?.currency || "CNY")}</strong>
+          </div>
+          <FormField label="校准备注">
+            <textarea value={note} onChange={(event) => setNote(event.target.value)} rows={3} placeholder="例如：与交易所账户余额核对" />
+          </FormField>
+        </div>
+      </SheetForm>
+    </Sheet>
+  );
+}
+
 export default function HoldingsPage() {
-  const { data: assets, loading, error, reload } = useResource(api.assets.list);
+  const { data: assets, loading, error, reload, setData } = useResource(api.assets.list);
   const [createOpen, setCreateOpen] = useState(false);
   const [operationAsset, setOperationAsset] = useState<Asset | null>(null);
   const [priceAsset, setPriceAsset] = useState<Asset | null>(null);
+  const [balanceAsset, setBalanceAsset] = useState<Asset | null>(null);
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState("all");
   const [refreshingPrices, setRefreshingPrices] = useState(false);
   const { notify } = useToast();
 
+  const replaceAsset = (updated: Asset) => {
+    setData((current) => current?.map((item) => item.id === updated.id ? updated : item) ?? current);
+  };
+
   const refreshPrices = async () => {
     setRefreshingPrices(true);
     try {
       const result = await api.assets.refreshPrices();
-      await reload();
+      const reloaded = await reload();
+      if (reloaded === null) {
+        notify("行情已写入，但持仓列表刷新失败，请重试", "error");
+        return;
+      }
       if (result.failed.length > 0) {
         notify(
           `已更新 ${result.updated.length} 项，${result.failed.length} 项失败${result.skipped.length ? `，跳过 ${result.skipped.length} 项` : ""}`,
@@ -420,6 +522,7 @@ export default function HoldingsPage() {
                         <td className="numeric"><strong className={Number(asset.pnl) >= 0 ? "positive-text" : "danger-text"}>{formatMoney(asset.pnl, asset.currency)}</strong><small className={Number(asset.pnlPercent) >= 0 ? "positive-text" : "danger-text"}>{Number(asset.pnlPercent) >= 0 ? "+" : ""}{formatNumber(asset.pnlPercent, 2)}%</small></td>
                         <td><StatusBadge label={stale ? "待更新" : "最新"} tone={stale ? "warning" : "positive"} /><small className="cell-secondary">{formatDateTime(asset.priceUpdatedAt)}</small></td>
                         <td><div className="row-actions">
+                          <button className="icon-button" type="button" title="校准余额" aria-label={`校准 ${asset.name} 的余额`} onClick={() => setBalanceAsset(asset)}><Scale size={17} /></button>
                           <button className="icon-button" type="button" title="记录操作" aria-label={`记录 ${asset.name} 的操作`} onClick={() => setOperationAsset(asset)}><PencilLine size={17} /></button>
                           <button className="icon-button" type="button" title="更新价格" aria-label={`更新 ${asset.name} 的价格`} onClick={() => setPriceAsset(asset)}><RefreshCw size={17} /></button>
                         </div></td>
@@ -438,7 +541,7 @@ export default function HoldingsPage() {
                     <header><div className="asset-cell"><AssetIcon symbol={asset.symbol} name={asset.name} currency={asset.currency} /><span><strong>{asset.name}</strong><small>{asset.account} · {assetKindLabels[asset.kind]}</small></span></div><StatusBadge label={stale ? "待更新" : "最新"} tone={stale ? "warning" : "positive"} /></header>
                     <div className="mobile-value-row"><div><small>市值</small><strong>{formatMoney(asset.marketValue, asset.currency)}</strong></div><div><small>盈亏</small><strong className={Number(asset.pnl) >= 0 ? "positive-text" : "danger-text"}>{Number(asset.pnl) >= 0 ? "+" : ""}{formatMoney(asset.pnl, asset.currency)}</strong></div></div>
                     <div className="mobile-meta"><span>{formatNumber(asset.quantity)} {asset.symbol}</span><span>价格 {formatDateTime(asset.priceUpdatedAt)}</span></div>
-                    <footer><Button className="secondary" type="button" onClick={() => setOperationAsset(asset)}><PencilLine size={16} /> 记操作</Button><Button className="secondary" type="button" onClick={() => setPriceAsset(asset)}><RefreshCw size={16} /> 改价格</Button></footer>
+                    <footer><Button className="secondary balance-action" type="button" onClick={() => setBalanceAsset(asset)}><Scale size={16} /> 校准余额</Button><Button className="secondary" type="button" onClick={() => setOperationAsset(asset)}><PencilLine size={16} /> 记操作</Button><Button className="secondary" type="button" onClick={() => setPriceAsset(asset)}><RefreshCw size={16} /> 改价格</Button></footer>
                   </article>
                 );
               })}
@@ -454,8 +557,18 @@ export default function HoldingsPage() {
       </div>
 
       <CreateAssetSheet open={createOpen} onClose={() => setCreateOpen(false)} onCreated={() => void reload()} />
-      <OperationSheet key={`operation-${operationAsset?.id || "none"}`} asset={operationAsset} onClose={() => setOperationAsset(null)} onSaved={() => void reload()} />
-      <PriceSheet key={`price-${priceAsset?.id || "none"}`} asset={priceAsset} onClose={() => setPriceAsset(null)} onSaved={() => void reload()} />
+      <BalanceSheet
+        key={`balance-${balanceAsset?.id || "none"}`}
+        asset={balanceAsset}
+        onClose={() => setBalanceAsset(null)}
+        onSaved={replaceAsset}
+        onConflict={() => {
+          setBalanceAsset(null);
+          void reload();
+        }}
+      />
+      <OperationSheet key={`operation-${operationAsset?.id || "none"}`} asset={operationAsset} onClose={() => setOperationAsset(null)} onSaved={replaceAsset} />
+      <PriceSheet key={`price-${priceAsset?.id || "none"}`} asset={priceAsset} onClose={() => setPriceAsset(null)} onSaved={replaceAsset} />
     </div>
   );
 }

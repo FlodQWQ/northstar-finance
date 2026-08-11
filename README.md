@@ -56,6 +56,10 @@ npm run start
 | `SCHEDULER_ENABLED` | `true` | 是否启动持久化事件调度器 |
 | `SCHEDULER_POLL_MS` | `30000` | 扫描到期事件的间隔，单位毫秒 |
 | `SCHEDULER_LEASE_MS` | `600000` | 单次调度任务的数据库租约时长，单位毫秒 |
+| `PRICE_SCHEDULER_ENABLED` | `true` | 是否自动刷新达到各资产过期阈值的 provider 行情 |
+| `PRICE_SCHEDULER_POLL_MS` | `300000` | 自动行情到期扫描间隔，单位毫秒；进程启动时也会立即扫描一次 |
+| `PRICE_SCHEDULER_RETRY_BASE_MS` / `PRICE_SCHEDULER_RETRY_MAX_MS` | `60000` / `3600000` | 单项行情失败后的指数退避下限和上限 |
+| `PRICE_REFRESH_CONCURRENCY` | `4` | 手动批量刷新与自动刷新共享的全局行情请求并发上限 |
 | `SMTP_HOST` | 空 | SMTP 主机；为空时邮件 provider 保持禁用 |
 | `SMTP_PORT` | `587` | SMTP 端口，通常为 `587` 或 `465` |
 | `SMTP_SECURE` | `false` | 端口 `465` 通常设为 `true`；`587` 使用 STARTTLS |
@@ -89,9 +93,13 @@ AI 路由只接受账户级 Bearer token，不接受页面 Session；Bearer toke
 
 升级 v1 数据库时，首次启动需暂时保留原 `APP_AUTH_USERNAME`、`APP_AUTH_PASSWORD` 和可选 `AI_API_TOKEN`。迁移会把所有旧数据和旧 AI token 归属该 owner；成功登录并确认数据后即可从环境文件删除这些旧变量。新生产库也可用同样两个账号变量创建一次性 owner；两者只在数据库尚无启动 owner 时读取。
 
+## 确定性持仓更新
+
+资产市值不是缓存字段，每次读取都按 `quantity × currentPrice` 确定性重算，不依赖 AI。网页端的“校准余额”调用 `PUT /api/assets/:id/balance`，请求必须提供当前 `expectedVersion` 和校准后的绝对 `quantity`，可选 `unitCost`、`asOf`、`note`；数量、成本和 adjustment 审计流水在同一 SQLite 事务内提交。版本冲突返回 `409 ASSET_VERSION_CONFLICT`，不会覆盖其他操作。普通 `PATCH /api/assets/:id` 不允许绕过该接口修改数量或成本。
+
 ## AI 原子命令 API
 
-登录账户后可通过 `POST /api/account/api-tokens` 创建只显示一次的 token，并为其分配 scope。读取 capabilities 需要 `ai:read`；执行命令批次同时需要 `finance:write` 和批内每种命令对应的细粒度 scope，例如 `assets:write`、`prices:write`、`operations:write`、`expected:write` 或 `events:write`。`GET /api/account/api-tokens` 列出当前账户的 token 元数据，`DELETE /api/account/api-tokens/:id` 吊销 token；这些账户接口使用页面 Session、Origin 和 CSRF 保护。
+登录账户后可通过 `POST /api/account/api-tokens` 创建只显示一次的 token，并为其分配 scope。读取 capabilities 需要 `ai:read`；执行命令批次同时需要 `finance:write` 和批内每种命令对应的细粒度 scope，例如 `assets:write`、`prices:write`、`operations:write`、`expected:write` 或 `events:write`。`asset.balance.calibrate` 使用绝对余额语义并要求 `assets:write`、资产版本和显式确认；它与网页端余额校准共用同一事务领域方法，不调用模型。`GET /api/account/api-tokens` 列出当前账户的 token 元数据，`DELETE /api/account/api-tokens/:id` 吊销 token；这些账户接口使用页面 Session、Origin 和 CSRF 保护。
 
 `GET /api/ai/capabilities` 返回白名单命令、确认要求、版本键格式和完整 JSON Schema。读取能力和写入 `POST /api/ai/commands/execute` 必须携带所属账户的 token：
 
@@ -127,6 +135,7 @@ Content-Type: application/json
 - `idempotencyKey` 在账户内唯一并绑定规范化后的完整请求；同键同请求会重放结果，同键不同请求返回冲突。
 - 所有更新命令必须在 `expectedVersions` 提供带类型前缀的版本，例如 `asset:<id>`；缺失或冲突时整批回滚。
 - 所有金额和数量必须是十进制字符串。
+- 普通买入、卖出、转入和转出流水使用 `quantity`；只有 `adjustment` 使用带符号的 `quantityDelta`。绝对余额校准使用 `asset.balance.calibrate`，不会把两种语义混在一起。
 - 流水、非零期初持仓、预期资产阶段变更，以及可启动联网任务或邮件的事件变更必须设置 `confirmed: true`。
 - 只要批内有一条高风险命令未确认，整批都会变成 `proposal`，任何业务数据都不会写入。
 - proposal 和 `dryRun: true` 会在回滚事务内执行完整领域校验，包括批内多条命令的累计影响，但不会保留业务写入。
@@ -281,6 +290,8 @@ docker compose cp finance-dashboard:/app/data/finance-backup.sqlite ./finance-ba
 ### 公开行情源
 
 `PriceProvider` 的默认值仍是 `manual`，不会产生外部请求。需要按资产账户自动更新价格时，在服务端环境设置 `PRICE_PROVIDER=multi`（或指定 `binance`、`okx`、`bitget`、`bybit`、`gate`、`coingecko` 作为首选源）。`multi` 会先根据账户名选择交易所，再按 Binance、OKX、Bitget、Bybit、Gate，最后 CoinGecko 的顺序回退；交易所 API 均为公开行情接口，不需要账户密钥。
+
+主应用启动时会立即扫描一次行情，之后按 `PRICE_SCHEDULER_POLL_MS` 定期扫描。只有 `priceMode=provider` 且 `priceUpdatedAt + staleAfterHours` 已到期的资产会请求外部行情；手动资产和仍新鲜的资产不会访问 provider。失败按资产独立退避，成功和失败互不阻塞，手动批量刷新与自动刷新共用相同的价格校验、乐观锁写入和并发上限。`PRICE_SCHEDULER_ENABLED=false` 可单独关闭该调度器，不影响事件调度和 AI worker。
 
 请求只允许固定的 HTTPS 域名，禁止重定向，单次请求有超时和 512 KiB 响应上限，报价链有总时限并使用短缓存。需要代理时使用 `PRICE_PROXY=http://host:port`；Docker 容器不能填写容器内的 `127.0.0.1`，应填写容器可达的宿主机地址。也可使用 `PRICE_TIMEOUT_MS`、`PRICE_MAX_QUOTE_TIME_MS` 和 `PRICE_CACHE_TTL_MS` 调整网络参数。
 

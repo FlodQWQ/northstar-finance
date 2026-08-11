@@ -88,6 +88,105 @@ describe("finance API", () => {
     });
   });
 
+  it("calibrates absolute balances with version checks and an adjustment audit trail", async () => {
+    await request(app)
+      .post("/api/assets")
+      .send({
+        id: "balance-asset",
+        name: "Balance asset",
+        symbol: "BAL",
+        kind: "crypto",
+        account: "Test wallet",
+        currency: "USD",
+        quantity: "2",
+        unitCost: "10",
+        currentPrice: "15",
+        priceMode: "manual",
+        priceSource: "test",
+      })
+      .expect(201);
+
+    const asOf = "2026-08-10T12:00:00.000Z";
+    const increased = await request(app)
+      .put("/api/assets/balance-asset/balance")
+      .send({
+        quantity: "5",
+        expectedVersion: 1,
+        unitCost: "11",
+        note: "Wallet reconciliation",
+        asOf,
+      })
+      .expect(200);
+
+    expect(increased.body.data).toMatchObject({
+      quantity: "5",
+      unitCost: "11",
+      currentPrice: "15",
+      marketValue: "75",
+      costBasis: "55",
+      version: 2,
+    });
+
+    const decreased = await request(app)
+      .put("/api/assets/balance-asset/balance")
+      .send({ quantity: "1", expectedVersion: 2 })
+      .expect(200);
+
+    expect(decreased.body.data).toMatchObject({
+      quantity: "1",
+      unitCost: "11",
+      currentPrice: "15",
+      marketValue: "15",
+      costBasis: "11",
+      version: 3,
+    });
+
+    const operations = await request(app)
+      .get("/api/assets/balance-asset/operations")
+      .expect(200);
+    const adjustments = operations.body.data.filter(
+      (operation: { type: string }) => operation.type === "adjustment",
+    );
+    expect(adjustments).toHaveLength(2);
+    expect(adjustments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        quantityDelta: "3",
+        unitPrice: "11",
+        note: "Wallet reconciliation",
+        occurredAt: asOf,
+      }),
+      expect.objectContaining({
+        quantityDelta: "-4",
+        unitPrice: "11",
+        note: "Balance calibrated",
+      }),
+    ]));
+
+    const conflict = await request(app)
+      .put("/api/assets/balance-asset/balance")
+      .send({ quantity: "9", expectedVersion: 2 })
+      .expect(409);
+    expect(conflict.body.error.code).toBe("ASSET_VERSION_CONFLICT");
+
+    const unchanged = await request(app).get("/api/assets/balance-asset").expect(200);
+    expect(unchanged.body.data).toMatchObject({ quantity: "1", marketValue: "15", version: 3 });
+    expect((await request(app).get("/api/assets/balance-asset/operations").expect(200)).body.data)
+      .toHaveLength(3);
+
+    await request(app)
+      .put("/api/assets/balance-asset/balance")
+      .send({ quantity: "2" })
+      .expect(400);
+
+    const bypass = await request(app)
+      .patch("/api/assets/balance-asset")
+      .send({ quantity: "99" })
+      .expect(400);
+    expect(bypass.body.error.code).toBe("VALIDATION_ERROR");
+    expect((await request(app).get("/api/assets/balance-asset").expect(200)).body.data)
+      .toMatchObject({ quantity: "1", marketValue: "15", version: 3 });
+  });
+
   it("preserves a negative quantity for a liability holding", async () => {
     const response = await request(app)
       .post("/api/assets")
@@ -111,6 +210,53 @@ describe("finance API", () => {
       marketValue: "-4000",
       costBasis: "-4000",
     });
+
+    const calibrated = await request(app)
+      .put("/api/assets/usdt-debt/balance")
+      .send({ quantity: "-3500", expectedVersion: 1, note: "Debt reconciliation" })
+      .expect(200);
+    expect(calibrated.body.data).toMatchObject({
+      quantity: "-3500",
+      marketValue: "-3500",
+      version: 2,
+    });
+
+    const operation = await request(app)
+      .post("/api/assets/usdt-debt/operations")
+      .send({ type: "adjustment", quantityDelta: "-250", note: "Additional borrowing" })
+      .expect(201);
+    expect(operation.body.data).toMatchObject({
+      operation: {
+        type: "adjustment",
+        quantityDelta: "-250",
+        note: "Additional borrowing",
+      },
+      asset: {
+        quantity: "-3750",
+        currentPrice: "1",
+        marketValue: "-3750",
+        version: 3,
+      },
+    });
+
+    await request(app)
+      .post("/api/assets/usdt-debt/operations")
+      .send({ type: "adjustment", quantity: "250" })
+      .expect(400);
+    await request(app)
+      .post("/api/assets/usdt-debt/operations")
+      .send({ type: "buy", quantityDelta: "250" })
+      .expect(400);
+
+    await request(app)
+      .put("/api/assets/usdt-debt/balance")
+      .send({ quantity: "0", expectedVersion: 3 })
+      .expect(200);
+    const oversold = await request(app)
+      .post("/api/assets/usdt-debt/operations")
+      .send({ type: "sell", quantity: "1" })
+      .expect(409);
+    expect(oversold.body.error.code).toBe("NEGATIVE_QUANTITY");
   });
 
   it("updates an expected asset status and keeps AI research as an audited update", async () => {

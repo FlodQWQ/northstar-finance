@@ -37,9 +37,12 @@ import {
 } from "./services/auth";
 import { SmtpEmailOutbox, type EmailOutbox } from "./services/email";
 import { MonitorService } from "./services/monitor";
+import { AssetPriceScheduler, type AssetPriceSchedulerOptions } from "./services/priceScheduler";
+import { describePriceRefreshError, ProviderPriceRefresher } from "./services/priceRefresh";
 import { DomainError, FinanceRepository } from "./services/repository";
 import { calculateNextRunAt, PersistentScheduler } from "./services/scheduler";
 import {
+  assetBalanceSchema,
   assetCreateSchema,
   assetPatchSchema,
   entityId,
@@ -68,6 +71,8 @@ export interface CreateAppOptions {
   registrationMode?: "open" | "closed";
   authService?: AuthService;
   disableAuthenticationForTests?: boolean;
+  priceRefreshConcurrency?: number;
+  priceSchedulerOptions?: AssetPriceSchedulerOptions;
 }
 
 export interface FinanceRuntime {
@@ -80,6 +85,7 @@ export interface FinanceRuntime {
   monitorService: MonitorService;
   commandService: AICommandService;
   scheduler: PersistentScheduler;
+  priceScheduler: AssetPriceScheduler;
   close(): void;
 }
 
@@ -98,74 +104,6 @@ function asyncRoute(
 ) {
   return (request: Request, response: Response, next: NextFunction) => {
     void handler(request, response, next).catch(next);
-  };
-}
-
-async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  concurrency: number,
-  worker: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  const workerCount = Math.min(concurrency, items.length);
-
-  await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await worker(items[index]);
-    }
-  }));
-
-  return results;
-}
-
-function createAsyncLimiter(concurrency: number) {
-  let active = 0;
-  const queue: Array<() => void> = [];
-
-  return async function runLimited<T>(task: () => Promise<T>): Promise<T> {
-    if (active >= concurrency) {
-      await new Promise<void>((resolve) => queue.push(resolve));
-    }
-    active += 1;
-    try {
-      return await task();
-    } finally {
-      active -= 1;
-      queue.shift()?.();
-    }
-  };
-}
-
-function batchPriceError(error: unknown): { code: string; message: string } {
-  if (error instanceof ZodError) {
-    return {
-      code: "PRICE_INVALID",
-      message: "Price provider returned an invalid price",
-    };
-  }
-  if (error instanceof PriceProviderError) {
-    const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
-      ? error.code
-      : "PRICE_REFRESH_FAILED";
-    return {
-      code,
-      message: "Price provider could not return a quote",
-    };
-  }
-  if (error instanceof DomainError) {
-    return {
-      code: error.code,
-      message: error.code === "ASSET_CHANGED"
-        ? "Asset changed while its provider price was being fetched"
-        : "Asset price could not be updated",
-    };
-  }
-  return {
-    code: "PRICE_REFRESH_FAILED",
-    message: "Price refresh failed",
   };
 }
 
@@ -338,7 +276,11 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
   // the same isolated worker, while research results remain scoped by repository.
   const aiProvider = options.aiProvider ?? createApplicationAIProviderFromEnv();
   const priceProvider = options.priceProvider ?? createPriceProviderFromEnv();
-  const runPriceQuote = createAsyncLimiter(4);
+  const priceRefresher = new ProviderPriceRefresher(
+    priceProvider,
+    options.priceRefreshConcurrency ?? Number(process.env.PRICE_REFRESH_CONCURRENCY ?? 4),
+  );
+  const priceScheduler = new AssetPriceScheduler(db, priceRefresher, options.priceSchedulerOptions);
   const emailOutboxFor = (ownerRepository: FinanceRepository) =>
     options.emailOutbox ?? new SmtpEmailOutbox(db, ownerRepository);
   const emailOutbox = emailOutboxFor(repository);
@@ -389,7 +331,9 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     monitorService,
     commandService,
     scheduler,
+    priceScheduler,
     close: () => {
+      priceScheduler.stop();
       scheduler.stop();
       if (ownsDatabase && db.open) db.close();
     },
@@ -663,13 +607,9 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
             },
           },
         }))
-      : await mapWithConcurrency(providerAssets, 4, async (asset) => {
+      : await Promise.all(providerAssets.map(async (asset) => {
           try {
-            // No database transaction spans this network request. The guarded
-            // repository write records the quote only if the asset is unchanged.
-            const quote = await runPriceQuote(() => priceProvider.getQuote(asset));
-            quote.price = nonNegativeDecimalString.parse(quote.price);
-            const updated = ownerRepository.updateProviderPrice(asset.id, asset.version, quote);
+            const updated = await priceRefresher.refresh(ownerRepository, asset);
             return {
               status: "updated" as const,
               value: {
@@ -687,11 +627,11 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
               value: {
                 id: asset.id,
                 name: asset.name,
-                error: batchPriceError(error),
+                error: describePriceRefreshError(error),
               },
             };
           }
-        });
+        }));
     const updated = outcomes
       .filter((outcome): outcome is Extract<typeof outcome, { status: "updated" }> =>
         outcome.status === "updated")
@@ -720,6 +660,14 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     response.json(data(services(response).repository.updateAsset(id, input), "Asset updated"));
   });
 
+  app.put("/api/assets/:id/balance", (request, response) => {
+    const id = parse(entityId, request.params.id);
+    const input = parse(assetBalanceSchema, request.body);
+    response.json(
+      data(services(response).repository.calibrateAssetBalance(id, input), "Asset balance calibrated"),
+    );
+  });
+
   app.delete("/api/assets/:id", (request, response) => {
     const id = parse(entityId, request.params.id);
     services(response).repository.deleteAsset(id);
@@ -735,7 +683,7 @@ export function createApp(options: CreateAppOptions = {}): FinanceApp {
     const id = parse(entityId, request.params.id);
     const input = parse(operationCreateSchema, request.body);
     response.status(201).json(
-      data(services(response).repository.recordOperation(id, input), "Operation recorded"),
+      data(services(response).repository.recordOperationWithAsset(id, input), "Operation recorded"),
     );
   });
 

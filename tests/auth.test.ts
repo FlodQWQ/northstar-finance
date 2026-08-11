@@ -96,7 +96,7 @@ function testOwner(app: FinanceApp): Promise<SignedInAccount> {
 function authenticated(
   app: FinanceApp,
   account: SignedInAccount,
-  method: "get" | "post" | "patch" | "delete",
+  method: "get" | "post" | "put" | "patch" | "delete",
   path: string,
 ) {
   const call = request(app)[method](path).set("Cookie", account.cookie);
@@ -467,6 +467,8 @@ describe("tenant isolation", () => {
 
     await authenticated(app, bob, "patch", "/api/assets/alice-asset")
       .send({ notes: "cross-account write" }).expect(404);
+    await authenticated(app, bob, "put", "/api/assets/alice-asset/balance")
+      .send({ quantity: "2", expectedVersion: 1 }).expect(404);
     await authenticated(app, bob, "delete", "/api/assets/alice-asset").expect(404);
     await authenticated(app, bob, "post", "/api/assets/alice-asset/operations")
       .send({ type: "buy", quantity: "1" }).expect(404);

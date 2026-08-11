@@ -11,6 +11,7 @@ import type {
 import { deploymentAIStatus } from "../providers/aiFactory";
 import { DEFAULT_OWNER_ID, type SqliteDatabase } from "../db/database";
 import type {
+  AssetBalanceInput,
   AssetCreateInput,
   AssetPatchInput,
   EventCreateInput,
@@ -298,8 +299,6 @@ export class FinanceRepository {
       kind: "kind",
       account: "account",
       currency: "currency",
-      quantity: "quantity",
-      unitCost: "unit_cost",
       currentPrice: "current_price",
       priceMode: "price_mode",
       priceSource: "price_source",
@@ -320,26 +319,6 @@ export class FinanceRepository {
       this.db.prepare(
         `UPDATE assets SET ${assignments.join(", ")}, version = version + 1, updated_at = ? WHERE owner_id = ? AND id = ?`,
       ).run(...values, now, this.ownerId, id);
-
-      if (input.quantity !== undefined && input.quantity !== current.quantity) {
-        const delta = new Decimal(input.quantity).minus(current.quantity);
-        this.db.prepare(`
-          INSERT INTO asset_operations (
-            id, owner_id, asset_id, operation_type, quantity_delta, unit_price, fee,
-            currency, note, occurred_at, idempotency_key, created_at
-          ) VALUES (?, ?, ?, 'adjustment', ?, ?, '0', ?, ?, ?, NULL, ?)
-        `).run(
-          randomUUID(),
-          this.ownerId,
-          id,
-          formatDecimal(delta),
-          input.unitCost ?? current.unitCost,
-          input.currency ?? current.currency,
-          "Quantity updated through asset edit",
-          now,
-          now,
-        );
-      }
 
       if (input.currentPrice !== undefined && input.currentPrice !== current.currentPrice) {
         const asOf = normalizedInput.priceUpdatedAt ?? now;
@@ -362,6 +341,58 @@ export class FinanceRepository {
     });
     update();
     return this.getAsset(id);
+  }
+
+  public calibrateAssetBalance(id: string, input: AssetBalanceInput): VersionedAsset {
+    const now = new Date().toISOString();
+    const occurredAt = input.asOf ?? now;
+
+    const calibrate = this.db.transaction(() => {
+      const current = this.getAsset(id);
+      const delta = new Decimal(input.quantity).minus(current.quantity);
+      const result = this.db.prepare(`
+        UPDATE assets
+        SET quantity = ?, unit_cost = COALESCE(?, unit_cost),
+            version = version + 1, updated_at = ?
+        WHERE owner_id = ? AND id = ? AND version = ?
+      `).run(
+        input.quantity,
+        input.unitCost ?? null,
+        now,
+        this.ownerId,
+        id,
+        input.expectedVersion,
+      );
+
+      if (result.changes === 0) {
+        throw new DomainError(
+          "Asset version does not match the expected version",
+          409,
+          "ASSET_VERSION_CONFLICT",
+        );
+      }
+
+      this.db.prepare(`
+        INSERT INTO asset_operations (
+          id, owner_id, asset_id, operation_type, quantity_delta, unit_price, fee,
+          currency, note, occurred_at, idempotency_key, created_at
+        ) VALUES (?, ?, ?, 'adjustment', ?, ?, '0', ?, ?, ?, NULL, ?)
+      `).run(
+        randomUUID(),
+        this.ownerId,
+        id,
+        formatDecimal(delta),
+        input.unitCost ?? current.unitCost,
+        current.currency,
+        input.note,
+        occurredAt,
+        now,
+      );
+
+      return this.getAsset(id);
+    });
+
+    return calibrate();
   }
 
   public deleteAsset(id: string): void {
@@ -393,51 +424,59 @@ export class FinanceRepository {
     }));
   }
 
-  public recordOperation(assetId: string, input: OperationCreateInput): Row {
-    const asset = this.getAsset(assetId);
-    if (input.idempotencyKey) {
-      const existing = this.db.prepare(
-        "SELECT * FROM asset_operations WHERE owner_id = ? AND asset_id = ? AND idempotency_key = ?",
-      ).get(this.ownerId, assetId, input.idempotencyKey) as Row | undefined;
-      if (existing) return this.listOperations(assetId).find((item) => item.id === existing.id) ?? existing;
-    }
-
-    const quantityRequired = ["opening", "buy", "sell", "transfer_in", "transfer_out", "claim"];
-    if (
-      quantityRequired.includes(input.type) &&
-      input.quantity === undefined &&
-      input.quantityDelta === undefined
-    ) {
-      throw new DomainError("This operation type requires a quantity", 400, "QUANTITY_REQUIRED");
-    }
-
-    let delta = new Decimal(input.quantityDelta ?? input.quantity ?? "0");
-    if (input.quantityDelta === undefined && ["sell", "transfer_out"].includes(input.type)) {
-      delta = delta.negated();
-    }
-    if (["dividend", "interest", "fee"].includes(input.type)) delta = new Decimal(0);
-
-    const currentQuantity = new Decimal(asset.quantity);
-    const nextQuantity = currentQuantity.plus(delta);
-    if (nextQuantity.isNegative()) {
-      throw new DomainError("Operation would make the holding quantity negative", 409, "NEGATIVE_QUANTITY");
-    }
-
-    let nextUnitCost = new Decimal(asset.unitCost);
-    if (delta.isPositive() && ["opening", "buy", "transfer_in", "claim"].includes(input.type)) {
-      const existingCost = currentQuantity.mul(asset.unitCost);
-      const addedCost = delta.mul(input.unitPrice).plus(input.fee);
-      nextUnitCost = nextQuantity.isZero() ? new Decimal(0) : existingCost.plus(addedCost).div(nextQuantity);
-    } else if (nextQuantity.isZero()) {
-      nextUnitCost = new Decimal(0);
-    }
-
-    const id = input.id ?? randomUUID();
-    const now = new Date().toISOString();
-    const occurredAt = input.occurredAt ?? now;
-    const operationCurrency = input.currency ?? asset.currency;
-
+  public recordOperationWithAsset(
+    assetId: string,
+    input: OperationCreateInput,
+  ): { operation: Row; asset: VersionedAsset } {
     const write = this.db.transaction(() => {
+      const asset = this.getAsset(assetId);
+      if (input.idempotencyKey) {
+        const existing = this.db.prepare(
+          "SELECT * FROM asset_operations WHERE owner_id = ? AND asset_id = ? AND idempotency_key = ?",
+        ).get(this.ownerId, assetId, input.idempotencyKey) as Row | undefined;
+        if (existing) {
+          return {
+            operation: this.listOperations(assetId).find((item) => item.id === existing.id) ?? existing,
+            asset,
+          };
+        }
+      }
+
+      const quantityRequired = ["opening", "buy", "sell", "transfer_in", "transfer_out", "claim"];
+      if (
+        quantityRequired.includes(input.type) &&
+        input.quantity === undefined &&
+        input.quantityDelta === undefined
+      ) {
+        throw new DomainError("This operation type requires a quantity", 400, "QUANTITY_REQUIRED");
+      }
+
+      let delta = new Decimal(input.quantityDelta ?? input.quantity ?? "0");
+      if (input.quantityDelta === undefined && ["sell", "transfer_out"].includes(input.type)) {
+        delta = delta.negated();
+      }
+      if (["dividend", "interest", "fee"].includes(input.type)) delta = new Decimal(0);
+
+      const currentQuantity = new Decimal(asset.quantity);
+      const nextQuantity = currentQuantity.plus(delta);
+      if (currentQuantity.gte(0) && nextQuantity.isNegative()) {
+        throw new DomainError("Operation would make the holding quantity negative", 409, "NEGATIVE_QUANTITY");
+      }
+
+      let nextUnitCost = new Decimal(asset.unitCost);
+      if (delta.isPositive() && ["opening", "buy", "transfer_in", "claim"].includes(input.type)) {
+        const existingCost = currentQuantity.mul(asset.unitCost);
+        const addedCost = delta.mul(input.unitPrice).plus(input.fee);
+        nextUnitCost = nextQuantity.isZero() ? new Decimal(0) : existingCost.plus(addedCost).div(nextQuantity);
+      } else if (nextQuantity.isZero()) {
+        nextUnitCost = new Decimal(0);
+      }
+
+      const id = input.id ?? randomUUID();
+      const now = new Date().toISOString();
+      const occurredAt = input.occurredAt ?? now;
+      const operationCurrency = input.currency ?? asset.currency;
+
       this.db.prepare(`
         INSERT INTO asset_operations (
           id, owner_id, asset_id, operation_type, quantity_delta, unit_price, fee,
@@ -462,9 +501,17 @@ export class FinanceRepository {
         SET quantity = ?, unit_cost = ?, version = version + 1, updated_at = ?
         WHERE owner_id = ? AND id = ?
       `).run(formatDecimal(nextQuantity), formatDecimal(nextUnitCost), now, this.ownerId, assetId);
+
+      return {
+        operation: this.listOperations(assetId).find((item) => item.id === id) as Row,
+        asset: this.getAsset(assetId),
+      };
     });
-    write();
-    return this.listOperations(assetId).find((item) => item.id === id) as Row;
+    return write();
+  }
+
+  public recordOperation(assetId: string, input: OperationCreateInput): Row {
+    return this.recordOperationWithAsset(assetId, input).operation;
   }
 
   public updatePrice(

@@ -82,10 +82,20 @@ export const assetCreateSchema = z
   .strict();
 
 export const assetPatchSchema = assetCreateSchema
-  .omit({ id: true })
+  .omit({ id: true, quantity: true, unitCost: true })
   .partial()
   .strict()
   .refine((value) => Object.keys(value).length > 0, "At least one field is required");
+
+export const assetBalanceSchema = z
+  .object({
+    quantity: decimalString,
+    expectedVersion: z.number().int().min(1),
+    unitCost: nonNegativeDecimalString.optional(),
+    note: z.string().trim().max(10_000).default("Balance calibrated"),
+    asOf: isoDateTime.optional(),
+  })
+  .strict();
 
 export const priceUpdateSchema = z
   .object({
@@ -110,10 +120,36 @@ export const operationCreateSchema = z
     idempotencyKey: z.string().trim().min(1).max(200).optional(),
   })
   .strict()
-  .refine(
-    (value) => value.quantity === undefined || value.quantityDelta === undefined,
-    "Use quantity or quantityDelta, not both",
-  );
+  .superRefine((value, context) => {
+    if (value.quantity !== undefined && value.quantityDelta !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Use quantity or quantityDelta, not both",
+      });
+    }
+    if (value.type === "adjustment") {
+      if (value.quantityDelta === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["quantityDelta"],
+          message: "Adjustment requires quantityDelta",
+        });
+      }
+      if (value.quantity !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["quantity"],
+          message: "Adjustment uses quantityDelta, not quantity",
+        });
+      }
+    } else if (value.quantityDelta !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["quantityDelta"],
+        message: "Only adjustment operations accept quantityDelta",
+      });
+    }
+  });
 
 export const expectedCreateSchema = z
   .object({
@@ -219,6 +255,7 @@ export const settingsPatchSchema = z
 
 export type AssetCreateInput = z.infer<typeof assetCreateSchema>;
 export type AssetPatchInput = z.infer<typeof assetPatchSchema>;
+export type AssetBalanceInput = z.infer<typeof assetBalanceSchema>;
 export type OperationCreateInput = z.infer<typeof operationCreateSchema>;
 export type PriceUpdateInput = z.infer<typeof priceUpdateSchema>;
 export type ExpectedCreateInput = z.infer<typeof expectedCreateSchema>;

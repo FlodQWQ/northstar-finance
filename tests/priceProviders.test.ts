@@ -13,6 +13,7 @@ import {
 function asset(overrides: Partial<Asset> = {}): Asset {
   return {
     id: "asset-test",
+    version: 1,
     name: "Bitcoin",
     symbol: "BTC",
     kind: "crypto",

@@ -5,6 +5,7 @@ export function useResource<T>(loader: () => Promise<T>) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const mounted = useRef(true);
+  const requestSequence = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -14,18 +15,19 @@ export function useResource<T>(loader: () => Promise<T>) {
   }, []);
 
   const reload = useCallback(async () => {
+    const requestId = ++requestSequence.current;
     setLoading(true);
     setError("");
     try {
       const result = await loader();
-      if (mounted.current) setData(result);
+      if (mounted.current && requestId === requestSequence.current) setData(result);
       return result;
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "加载失败";
-      if (mounted.current) setError(message);
+      if (mounted.current && requestId === requestSequence.current) setError(message);
       return null;
     } finally {
-      if (mounted.current) setLoading(false);
+      if (mounted.current && requestId === requestSequence.current) setLoading(false);
     }
   }, [loader]);
 

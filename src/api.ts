@@ -2,6 +2,7 @@ import type {
   ApiEnvelope,
   AppSettings,
   Asset,
+  AssetOperation,
   DashboardData,
   ExpectedAsset,
   MonitorRun,
@@ -152,6 +153,14 @@ export type OperationInput = {
   idempotencyKey?: string;
 };
 
+export type BalanceUpdateInput = {
+  quantity: string;
+  expectedVersion: number;
+  unitCost?: string;
+  note?: string;
+  asOf?: string;
+};
+
 export type PriceInput = {
   price?: string;
   currency?: string;
@@ -246,8 +255,13 @@ export const api = {
     }),
     updatePrice: (id: string, input: PriceInput) =>
       request<Asset>(`/api/assets/${id}/price`, { method: "POST", body: input }),
+    updateBalance: (id: string, input: BalanceUpdateInput) =>
+      request<Asset>(`/api/assets/${id}/balance`, { method: "PUT", body: input }),
     createOperation: (id: string, input: OperationInput) =>
-      request<unknown>(`/api/assets/${id}/operations`, { method: "POST", body: input }),
+      request<{ operation: AssetOperation; asset: Asset }>(`/api/assets/${id}/operations`, {
+        method: "POST",
+        body: input,
+      }),
   },
   expected: {
     list: () => request<ExpectedAsset[]>("/api/expected"),

@@ -275,6 +275,8 @@ td.numeric strong, td.numeric small { display: block; white-space: nowrap; }
 .form-preview { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 12px; background: #f6f7f9; border: 1px solid var(--border); border-radius: 6px; }
 .form-preview span { color: var(--muted); font-size: 11px; }
 .form-preview strong { font-size: 14px; font-variant-numeric: tabular-nums; }
+.balance-preview > span { min-width: 0; display: grid; gap: 3px; }
+.balance-preview small { color: var(--text-soft); font-size: 10px; overflow-wrap: anywhere; }
 .toggle-row { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 8px 0; cursor: pointer; }
 .toggle-row > span { display: grid; }
 .toggle-row strong { font-size: 12px; }
@@ -481,6 +483,7 @@ td.numeric strong, td.numeric small { display: block; white-space: nowrap; }
   .mobile-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; }
   .mobile-data-item > footer { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .mobile-data-item > footer .button { width: 100%; min-height: 44px; }
+  .mobile-data-item > footer .balance-action { grid-column: 1 / -1; }
   .event-card { cursor: pointer; }
   .next-action { padding: 0 2px; }
   .next-action strong { font-size: 12px; }

@@ -9,6 +9,9 @@ const app = createApp({ serveStatic: production });
 if (process.env.SCHEDULER_ENABLED !== "false") {
   app.finance.scheduler.start();
 }
+if (process.env.PRICE_SCHEDULER_ENABLED !== "false") {
+  app.finance.priceScheduler.start();
+}
 
 const server = app.listen(port, host, () => {
   console.log(`Northstar Finance API listening on http://${host}:${port}`);
@@ -19,6 +22,7 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`Received ${signal}; shutting down.`);
+  app.finance.priceScheduler.stop();
   app.finance.scheduler.stop();
   server.close(() => {
     app.finance.close();

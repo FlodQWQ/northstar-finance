@@ -108,6 +108,80 @@ describe("AI atomic command API", () => {
     expect(app.finance.repository.getAsset("asset-ai").quantity).toBe("2");
   });
 
+  it("calibrates an absolute balance only with confirmation and the expected asset version", async () => {
+    await createAsset();
+    const proposal = await request(app)
+      .post("/api/ai/commands/execute")
+      .send({
+        idempotencyKey: "balance-proposal-1",
+        actor: "test-agent",
+        expectedVersions: { "asset:asset-ai": 1 },
+        commands: [{
+          type: "asset.balance.calibrate",
+          payload: { assetId: "asset-ai", quantity: "3", note: "Account reconciliation" },
+        }],
+      })
+      .expect(201);
+
+    expect(proposal.body.data.results[0].status).toBe("proposal");
+    expect(app.finance.repository.getAsset("asset-ai")).toMatchObject({
+      quantity: "1",
+      marketValue: "10",
+      version: 1,
+    });
+
+    const batch = {
+      idempotencyKey: "balance-apply-1",
+      actor: "test-agent",
+      expectedVersions: { "asset:asset-ai": 1 },
+      commands: [{
+        type: "asset.balance.calibrate",
+        confirmed: true,
+        payload: {
+          assetId: "asset-ai",
+          quantity: "3",
+          unitCost: "11",
+          note: "Account reconciliation",
+          asOf: "2026-08-11T04:00:00.000Z",
+        },
+      }],
+    };
+    const applied = await request(app)
+      .post("/api/ai/commands/execute")
+      .send(batch)
+      .expect(201);
+
+    expect(applied.body.data.results[0]).toMatchObject({
+      type: "asset.balance.calibrate",
+      status: "applied",
+      targetId: "asset-ai",
+      result: {
+        quantity: "3",
+        unitCost: "11",
+        currentPrice: "10",
+        marketValue: "30",
+        version: 2,
+      },
+    });
+    const adjustments = app.finance.repository.listOperations("asset-ai")
+      .filter((operation) => operation.type === "adjustment");
+    expect(adjustments).toEqual([
+      expect.objectContaining({
+        quantityDelta: "2",
+        note: "Account reconciliation",
+        occurredAt: "2026-08-11T04:00:00.000Z",
+      }),
+    ]);
+
+    const replay = await request(app)
+      .post("/api/ai/commands/execute")
+      .send(batch)
+      .expect(200);
+    expect(replay.body.data.replayed).toBe(true);
+    expect(app.finance.repository.listOperations("asset-ai")
+      .filter((operation) => operation.type === "adjustment")).toHaveLength(1);
+  });
+
   it("rejects an idempotency key reused with a different request", async () => {
     await createAsset();
     const original = {
